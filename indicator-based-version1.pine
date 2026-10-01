@@ -7,7 +7,7 @@ indicator(title = "SMC & ICT & Indicators + Scalping Master"
   , max_labels_count = 500
   , max_lines_count = 500
   , max_boxes_count = 500
-  , max_bars_back = 500)
+  , max_bars_back = 5000)
 //-----------------------------------------------------------------------------{
 //Constants
 //-----------------------------------------------------------------------------{
@@ -271,6 +271,12 @@ fvg_extend = input.int(1, "Extend FVG"
   , group = 'Fair Value Gaps'
   , tooltip = EXTEND_FVG, display = display.none)
 
+fvg_max_active = input.int(40, "Maximum active FVGs per direction"
+  , minval = 5
+  , maxval = 100
+  , group = 'Fair Value Gaps'
+  , tooltip = 'Caps stored FVG objects and removes mitigated IDs to prevent historical array growth.', display = display.none)
+
 //----------------------------------------}
 //Previous day/week high/low
 //----------------------------------------{
@@ -357,13 +363,51 @@ color smc_discount_css = use_theme_palette ? theme_bull_css : discount_css
 n = bar_index
 
 atr = ta.atr(200)
-cmean_range = ta.cum(high - low) / n
+cmean_range = ta.cum(high - low) / math.max(n, 1)
 
-//Confirmed previous-period high/low output function
-previous_hl() => [high[1], low[1]]
+//Track each completed period's confirmed extremes and the exact chart candles
+//whose wicks formed them. Each D/W/M call keeps an independent history.
+previous_hl_with_time(tf) =>
+    new_period = timeframe.change(tf)
 
-//Get ohlc values function
-get_ohlc()=> [close[1], open[1], high, low, high[2], low[2]]
+    var float active_high = na
+    var float active_low = na
+    var int active_high_time = na
+    var int active_low_time = na
+    var float previous_high = na
+    var float previous_low = na
+    var int previous_high_time = na
+    var int previous_low_time = na
+
+    if na(active_high)
+        active_high := high
+        active_low := low
+        active_high_time := time
+        active_low_time := time
+    else if new_period
+        previous_high := active_high
+        previous_low := active_low
+        previous_high_time := active_high_time
+        previous_low_time := active_low_time
+
+        active_high := high
+        active_low := low
+        active_high_time := time
+        active_low_time := time
+    else
+        if high >= active_high
+            active_high := high
+            active_high_time := time
+
+        if low <= active_low
+            active_low := low
+            active_low_time := time
+
+    [previous_high, previous_low, previous_high_time, previous_low_time]
+
+//Return the last fully closed three-candle pattern. The request uses
+//lookahead_on below, so every value is already confirmed when published.
+get_ohlc()=> [close[2], open[2], high[1], low[1], high[3], low[3]]
 
 //Display Structure function
 display_Structure(x, y, txt, css, dashed, down, lbl_size)=>
@@ -427,33 +471,40 @@ ob_coord(use_max, loc, target_top, target_btm, target_left, target_type)=>
 
 //Set order blocks
 display_ob(boxes, target_top, target_btm, target_left, target_type, show_last, swing, size)=>
-    for i = 0 to math.min(show_last-1, size-1)
-        get_box = array.get(boxes, i)
+    if array.size(boxes) > 0
+        for i = 0 to array.size(boxes) - 1
+            get_box = array.get(boxes, i)
 
-        box.set_lefttop(get_box, array.get(target_left, i), array.get(target_top, i))
-        box.set_rightbottom(get_box, array.get(target_left, i), array.get(target_btm, i))
-        box.set_extend(get_box, extend.right)
+            if i < math.min(show_last, size)
+                box.set_lefttop(get_box, array.get(target_left, i), array.get(target_top, i))
+                box.set_rightbottom(get_box, array.get(target_left, i), array.get(target_btm, i))
+                box.set_extend(get_box, extend.right)
 
-        color css = na
-        
-        if swing 
-            if style == 'Monochrome'
-                css := array.get(target_type, i) == 1 ? color.new(use_theme_palette ? theme_neutral_css : #b2b5be, 80) : color.new(use_theme_palette ? theme_neutral_dark_css : #5d606b, 80)
-                border_css = array.get(target_type, i) == 1 ? (use_theme_palette ? theme_neutral_css : #b2b5be) : (use_theme_palette ? theme_neutral_dark_css : #5d606b)
-                box.set_border_color(get_box, border_css)
+                color css = na
+
+                if swing
+                    if style == 'Monochrome'
+                        css := array.get(target_type, i) == 1 ? color.new(use_theme_palette ? theme_neutral_css : #b2b5be, 80) : color.new(use_theme_palette ? theme_neutral_dark_css : #5d606b, 80)
+                        border_css = array.get(target_type, i) == 1 ? (use_theme_palette ? theme_neutral_css : #b2b5be) : (use_theme_palette ? theme_neutral_dark_css : #5d606b)
+                        box.set_border_color(get_box, border_css)
+                    else
+                        css := array.get(target_type, i) == 1 ? smc_ob_bull_css : smc_ob_bear_css
+                        box.set_border_color(get_box, css)
+
+                    box.set_bgcolor(get_box, css)
+                else
+                    if style == 'Monochrome'
+                        css := array.get(target_type, i) == 1 ? color.new(use_theme_palette ? theme_neutral_css : #b2b5be, 80) : color.new(use_theme_palette ? theme_neutral_dark_css : #5d606b, 80)
+                    else
+                        css := array.get(target_type, i) == 1 ? smc_iob_bull_css : smc_iob_bear_css
+
+                    box.set_border_color(get_box, css)
+                    box.set_bgcolor(get_box, css)
             else
-                css := array.get(target_type, i) == 1 ? smc_ob_bull_css : smc_ob_bear_css
-                box.set_border_color(get_box, css)
-
-            box.set_bgcolor(get_box, css)
-        else
-            if style == 'Monochrome'
-                css := array.get(target_type, i) == 1 ? color.new(use_theme_palette ? theme_neutral_css : #b2b5be, 80) : color.new(use_theme_palette ? theme_neutral_dark_css : #5d606b, 80)
-            else
-                css := array.get(target_type, i) == 1 ? smc_iob_bull_css : smc_iob_bear_css
-            
-            box.set_border_color(get_box, css)
-            box.set_bgcolor(get_box, css)
+                // Hide any preallocated slot that no longer maps to an active OB.
+                box.set_bgcolor(get_box, na)
+                box.set_border_color(get_box, na)
+                box.set_extend(get_box, extend.none)
         
 //Line Style function
 get_line_style(style) =>
@@ -463,11 +514,11 @@ get_line_style(style) =>
         '····' => line.style_dotted
 
 //Set line/labels function for previous high/lows
-phl(h, l, period_start, tf, css)=>
+phl(h, l, high_time, low_time, tf, css, line_style)=>
     var line high_line = line.new(na,na,na,na
       , xloc = xloc.bar_time
       , color = css
-      , style = get_line_style(pdhl_style))
+      , style = get_line_style(line_style))
 
     var label high_lbl = label.new(na,na
       , xloc = xloc.bar_time
@@ -480,7 +531,7 @@ phl(h, l, period_start, tf, css)=>
     var line low_line = line.new(na,na,na,na
       , xloc = xloc.bar_time
       , color = css
-      , style = get_line_style(pdhl_style))
+      , style = get_line_style(line_style))
 
     var label low_lbl = label.new(na,na
       , xloc = xloc.bar_time
@@ -491,10 +542,10 @@ phl(h, l, period_start, tf, css)=>
       , style = label.style_label_left)
 
     hy = h
-    hx = period_start
+    hx = high_time
 
     ly = l
-    lx = period_start
+    lx = low_time
 
     if barstate.islast
         ext = time + (time - time[1])*20
@@ -706,10 +757,10 @@ var ob_type = array.new_int(0)
 var bull_concordant = true
 
 if ifilter_confluence
-    bull_concordant := high - math.max(close, open) > math.min(close, open - low)
+    bull_concordant := high - math.max(close, open) > math.min(close, open) - low
 
 //Detect internal bullish Structure
-if ta.crossover(close, itop_y) and itop_cross and top_y != itop_y and bull_concordant
+if barstate.isconfirmed and ta.crossover(close, itop_y) and itop_cross and top_y != itop_y and bull_concordant
     bool choch = na
     
     if itrend < 0
@@ -732,7 +783,7 @@ if ta.crossover(close, itop_y) and itop_cross and top_y != itop_y and bull_conco
         ob_coord(false, itop_x, iob_top, iob_btm, iob_left, iob_type)
 
 //Detect bullish Structure
-if ta.crossover(close, top_y) and top_cross
+if barstate.isconfirmed and ta.crossover(close, top_y) and top_cross
     bool choch = na
     
     if trend < 0
@@ -760,10 +811,10 @@ if ta.crossover(close, top_y) and top_cross
 var bear_concordant = true
 
 if ifilter_confluence
-    bear_concordant := high - math.max(close, open) < math.min(close, open - low)
+    bear_concordant := high - math.max(close, open) < math.min(close, open) - low
 
 //Detect internal bearish Structure
-if ta.crossunder(close, ibtm_y) and ibtm_cross and btm_y != ibtm_y and bear_concordant
+if barstate.isconfirmed and ta.crossunder(close, ibtm_y) and ibtm_cross and btm_y != ibtm_y and bear_concordant
     bool choch = false
     
     if itrend > 0
@@ -786,7 +837,7 @@ if ta.crossunder(close, ibtm_y) and ibtm_cross and btm_y != ibtm_y and bear_conc
         ob_coord(true, ibtm_x, iob_top, iob_btm, iob_left, iob_type)
 
 //Detect bearish Structure
-if ta.crossunder(close, btm_y) and btm_cross
+if barstate.isconfirmed and ta.crossunder(close, btm_y) and btm_cross
     bool choch = na
     
     if trend > 0
@@ -865,12 +916,10 @@ if barstate.isfirst
         for i = 0 to ob_showlast-1
             array.push(ob_boxes, box.new(na,na,na,na, xloc = xloc.bar_time))
 
-if iob_size > 0
-    if barstate.islast
+if barstate.islast
+    if show_iob
         display_ob(iob_boxes, iob_top, iob_btm, iob_left, iob_type, iob_showlast, false, iob_size)
-
-if ob_size > 0
-    if barstate.islast
+    if show_ob
         display_ob(ob_boxes, ob_top, ob_btm, ob_left, ob_type, ob_showlast, true, ob_size)
 
 //-----------------------------------------------------------------------------}
@@ -954,14 +1003,14 @@ bullish_fvg_cnd = false
 bearish_fvg_cnd = false
 
 [src_c1, src_o1, src_h, src_l, src_h2, src_l2] =
-  request.security(syminfo.tickerid, fvg_tf, get_ohlc())
+  request.security(syminfo.tickerid, fvg_tf, get_ohlc(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
 
 if show_fvg
     delta_per = (src_c1 - src_o1) / src_o1 * 100
 
     change_tf = timeframe.change(fvg_tf)
 
-    threshold = fvg_auto ? ta.cum(math.abs(change_tf ? delta_per : 0)) / n * 2 
+    threshold = fvg_auto ? ta.cum(math.abs(change_tf ? delta_per : 0)) / math.max(n, 1) * 2
       : 0
 
     //FVG conditions
@@ -984,6 +1033,9 @@ if show_fvg
         array.unshift(bullish_fvg_min, box.new(n-1, math.avg(src_l, src_h2), n + fvg_extend, src_h2
           , border_color = smc_fvg_bull_css
           , bgcolor = smc_fvg_bull_css))
+        if array.size(bullish_fvg_max) > fvg_max_active
+            box.delete(array.pop(bullish_fvg_max))
+            box.delete(array.pop(bullish_fvg_min))
     
     if bearish_fvg_cnd
         array.unshift(bearish_fvg_max, box.new(n-1, src_h, n + fvg_extend, math.avg(src_h, src_l2)
@@ -993,43 +1045,57 @@ if show_fvg
         array.unshift(bearish_fvg_min, box.new(n-1, math.avg(src_h, src_l2), n + fvg_extend, src_l2
           , border_color = smc_fvg_bear_css
           , bgcolor = smc_fvg_bear_css))
+        if array.size(bearish_fvg_max) > fvg_max_active
+            box.delete(array.pop(bearish_fvg_max))
+            box.delete(array.pop(bearish_fvg_min))
 
-    for bx in bullish_fvg_min
-        if low < box.get_bottom(bx)
-            box.delete(bx)
-            box.delete(array.get(bullish_fvg_max, array.indexof(bullish_fvg_min, bx)))
+    // Remove paired IDs as well as their drawings. Reverse traversal keeps
+    // every index valid when several gaps are mitigated on the same candle.
+    if array.size(bullish_fvg_min) > 0
+        _bull_fvg_count = array.size(bullish_fvg_min)
+        for _step = 0 to _bull_fvg_count - 1
+            _index = _bull_fvg_count - 1 - _step
+            _min_box = array.get(bullish_fvg_min, _index)
+            if low < box.get_bottom(_min_box)
+                box.delete(_min_box)
+                box.delete(array.get(bullish_fvg_max, _index))
+                array.remove(bullish_fvg_min, _index)
+                array.remove(bullish_fvg_max, _index)
     
-    for bx in bearish_fvg_max
-        if high > box.get_top(bx)
-            box.delete(bx)
-            box.delete(array.get(bearish_fvg_min, array.indexof(bearish_fvg_max, bx)))
+    if array.size(bearish_fvg_max) > 0
+        _bear_fvg_count = array.size(bearish_fvg_max)
+        for _step = 0 to _bear_fvg_count - 1
+            _index = _bear_fvg_count - 1 - _step
+            _max_box = array.get(bearish_fvg_max, _index)
+            if high > box.get_top(_max_box)
+                box.delete(_max_box)
+                box.delete(array.get(bearish_fvg_min, _index))
+                array.remove(bearish_fvg_max, _index)
+                array.remove(bearish_fvg_min, _index)
 
 //-----------------------------------------------------------------------------}
 //Previous day/week high/lows
 //-----------------------------------------------------------------------------{
-//Daily high/low
-[pdh, pdl] = request.security(syminfo.tickerid, 'D', previous_hl()
-  , lookahead = barmerge.lookahead_on)
+//Daily high/low and the candles whose wicks formed them
+[pdh, pdl, pdh_time, pdl_time] = previous_hl_with_time('D')
 
-//Weekly high/low
-[pwh, pwl] = request.security(syminfo.tickerid, 'W', previous_hl()
-  , lookahead = barmerge.lookahead_on)
+//Weekly high/low and the candles whose wicks formed them
+[pwh, pwl, pwh_time, pwl_time] = previous_hl_with_time('W')
 
-//Monthly high/low
-[pmh, pml] = request.security(syminfo.tickerid, 'M', previous_hl()
-  , lookahead = barmerge.lookahead_on)
+//Monthly high/low and the candles whose wicks formed them
+[pmh, pml, pmh_time, pml_time] = previous_hl_with_time('M')
 
 //Display Daily
 if show_pdhl
-    phl(pdh, pdl, time('D'), 'D', smc_pdhl_css)
+    phl(pdh, pdl, pdh_time, pdl_time, 'D', smc_pdhl_css, pdhl_style)
 
 //Display Weekly
 if show_pwhl
-    phl(pwh, pwl, time('W'), 'W', smc_pwhl_css)
+    phl(pwh, pwl, pwh_time, pwl_time, 'W', smc_pwhl_css, pwhl_style)
     
 //Display Monthly
 if show_pmhl
-    phl(pmh, pml, time('M'), 'M', smc_pmhl_css)
+    phl(pmh, pml, pmh_time, pml_time, 'M', smc_pmhl_css, pmhl_style)
 
 //-----------------------------------------------------------------------------}
 //Premium/Discount/Equilibrium zones
@@ -1149,7 +1215,7 @@ ds_line_pc_display = input.float(title='% line', defval=3.0, step=0.5, minval=0,
 ds_line_max = input.int(title='Max line', defval=3, minval=0, maxval=5, inline='line', group='Demand & Supply',
  tooltip=' --- % Line  --- ' + '\n' + 'Display lines of active zones when the close is within this % of the line. Max is 5%.' + '\n\n' +
  ' --- Max Line  --- ' + '\n' + 'The maximum number of lines to display for each zone type.', display = display.none)
-ds_max_zones = input.int(title='Max number of zones', defval=100, step=50, maxval=200, group='Demand & Supply',
+ds_max_zones = input.int(title='Max number of zones', defval=100, step=50, minval=1, maxval=200, group='Demand & Supply',
  tooltip=' --- Max number of zones ---' + '\n\n' + 'The maximum number of zones for each zone type.\nUp to 200 boxes can be displayed for each zone type.', display = display.none)
 
 ds_hours_offset = input.float(0.0, "Timezone offset (H)", minval=-12, maxval=14, group='Demand & Supply',
@@ -1239,16 +1305,17 @@ var supply_zones_label_all = array.new_label(ds_line_max)
 var supply_zones_line_all = array.new_line(ds_line_max)
 
 if barstate.isfirst
-    for i = 0 to ds_line_max - 1
-        array.set(demand_zones_s1_line, i, line.new(na, na, na, na, xloc=xloc.bar_time, color=ds_demand_border_css, style=line.style_solid))
-        array.set(supply_zones_s1_line, i, line.new(na, na, na, na, xloc=xloc.bar_time, color=ds_supply_border_css, style=line.style_solid))
-        array.set(demand_zones_s1_line_price, i, label.new(na, na, textcolor=theme_text_css, style=label.style_label_left))
-        array.set(supply_zones_s1_line_price, i, label.new(na, na, textcolor=theme_text_css, style=label.style_label_left))
-        
-        array.set(demand_zones_label_all, i, label.new(na, na, textcolor=theme_text_css, style=label.style_label_left))
-        array.set(supply_zones_label_all, i, label.new(na, na, textcolor=theme_text_css, style=label.style_label_left))
-        array.set(demand_zones_line_all, i, line.new(na, na, na, na, color=theme_transparent_css, style=line.style_solid))
-        array.set(supply_zones_line_all, i, line.new(na, na, na, na, color=theme_transparent_css, style=line.style_solid))
+    if ds_line_max > 0
+        for i = 0 to ds_line_max - 1
+            array.set(demand_zones_s1_line, i, line.new(na, na, na, na, xloc=xloc.bar_time, color=ds_demand_border_css, style=line.style_solid))
+            array.set(supply_zones_s1_line, i, line.new(na, na, na, na, xloc=xloc.bar_time, color=ds_supply_border_css, style=line.style_solid))
+            array.set(demand_zones_s1_line_price, i, label.new(na, na, textcolor=theme_text_css, style=label.style_label_left))
+            array.set(supply_zones_s1_line_price, i, label.new(na, na, textcolor=theme_text_css, style=label.style_label_left))
+
+            array.set(demand_zones_label_all, i, label.new(na, na, textcolor=theme_text_css, style=label.style_label_left))
+            array.set(supply_zones_label_all, i, label.new(na, na, textcolor=theme_text_css, style=label.style_label_left))
+            array.set(demand_zones_line_all, i, line.new(na, na, na, na, color=theme_transparent_css, style=line.style_solid))
+            array.set(supply_zones_line_all, i, line.new(na, na, na, na, color=theme_transparent_css, style=line.style_solid))
         
 bear_run = ta.barssince(open < close)
 bull_run = ta.barssince(open > close)
@@ -1341,7 +1408,7 @@ add_ds_zone(_zone_type) =>
                     array.remove(_zones_s1_active, i)
                     array.remove(_zones_s1, i)
                     if _showZone
-                        array.remove(_zones_box, i)
+                        box.delete(array.remove(_zones_box, i))
                     if array.size(_zones_time) == ds_max_zones
                         break
 
@@ -1370,8 +1437,8 @@ remove_ds_alerts(_type, _time_unix) =>
             break
     // Everything from _slice_start will be expired
     if not na(_slice_start)
-        _sliceArr = array.slice(_zones_alert, _slice_start, array.size(_zones_alert))
-        array.clear(_sliceArr)
+        while array.size(_zones_alert) > _slice_start
+            array.pop(_zones_alert)
 
 check_repeat_alert(_type, _price) =>
     _zones_alert = _type == 'S' ? supply_zones_alert : demand_zones_alert
@@ -1388,17 +1455,18 @@ get_ds_zone_info(_zone_type, _s1, _s1_time) =>
 
 alert_ds(_do, _zone_type, _s1, _s1_time, _alert_type) =>
     _repeatAlert = false
+    _alerts_enabled = _zone_type == 'S' ? dsAlertSupply : dsAlertDemand
 
     // Hit only happens once because the zone is deactivated
     // Near can happen many times, so do not repeat within time limit
-    if _do and _alert_type == 'N' and ds_alert_mins_no_repeat > 0
+    if _do and _alerts_enabled and _alert_type == 'N' and ds_alert_mins_no_repeat > 0
         _time_unix = time
         remove_ds_alerts(_zone_type, _time_unix)
         _repeatAlert := check_repeat_alert(_zone_type, _s1)
         if not _repeatAlert
             add_ds_alert(_zone_type, _time_unix, _s1)
 
-    if _do and not _repeatAlert
+    if _do and _alerts_enabled and not _repeatAlert
         _msg = _alert_type == 'H' ? 'Zone hit' : 'Near zone'
         _msg += '\n' + get_ds_zone_info(_zone_type, _s1, _s1_time)
         alert(_msg)
@@ -1416,50 +1484,51 @@ deactivate_ds_limited(_do, _zone_type, _s1, _s1_time) =>
         _index = array.indexof(_zones_time, _s1_time)
         if _index >= 0
             array.set(_zones_s1_active, _index, false)
-        if showDemandZone and _index >= 0
+        _show_box = _zone_type == 'S' ? showSupplyZone : showDemandZone
+        if _show_box and _index >= 0 and array.size(_zones_box) > _index
             _box = array.size(_zones_box) > _index ? array.get(_zones_box, _index) : na
-            deactivate_ds_box(_box)
+            if not na(_box)
+                deactivate_ds_box(_box)
 
 check_ds_zone_hit() =>
-    // max set at 5, so it does not take too long
-    loop_break_pc = 5
-
     // Use data from all which only contains active zones.
-    // Deactivate the limited labels
-    for i = 0 to (array.size(demand_zones_s1_all) == 0 ? na : array.size(demand_zones_s1_all) - 1)
-        _s1 = array.size(demand_zones_s1_all) > i ? array.get(demand_zones_s1_all, i) : na
-        _s1_time = array.size(demand_zones_time_all) > i ? array.get(demand_zones_time_all, i) : na
+    // A while loop keeps the same index after a removal, so an adjacent hit
+    // cannot be skipped or read past the new array boundary.
+    int _demand_i = 0
+    while _demand_i < array.size(demand_zones_s1_all)
+        _s1 = array.get(demand_zones_s1_all, _demand_i)
+        _s1_time = array.get(demand_zones_time_all, _demand_i)
         _price_near = get_amount_by_pc(_s1, ds_alerts_pc_near, 'add')
-        // Hit or Near
         _alert_type = low <= _s1 ? 'H' : low <= _price_near ? 'N' : ''
-        if _alert_type == 'H'
-            array.remove(demand_zones_s1_all, i)
-            array.remove(demand_zones_time_all, i)
-        
+        _hit = _alert_type == 'H'
         alert_ds(_alert_type=='H' or _alert_type=='N', 'D', _s1, _s1_time, _alert_type)
-        deactivate_ds_limited(_alert_type=='H', 'D', _s1, _s1_time)
-        if low > _s1 and get_pc_diff_abs(low, _s1) > loop_break_pc
-            break
+        deactivate_ds_limited(_hit, 'D', _s1, _s1_time)
+        if _hit
+            array.remove(demand_zones_s1_all, _demand_i)
+            array.remove(demand_zones_time_all, _demand_i)
+        else
+            _demand_i += 1
 
-    for i = 0 to (array.size(supply_zones_s1_all) == 0 ? na : array.size(supply_zones_s1_all) - 1)
-        _s1 = array.size(supply_zones_s1_all) > i ? array.get(supply_zones_s1_all, i) : na
-        _s1_time = array.size(supply_zones_time_all) > i ? array.get(supply_zones_time_all, i) : na
+    int _supply_i = 0
+    while _supply_i < array.size(supply_zones_s1_all)
+        _s1 = array.get(supply_zones_s1_all, _supply_i)
+        _s1_time = array.get(supply_zones_time_all, _supply_i)
         _price_near = get_amount_by_pc(_s1, ds_alerts_pc_near, 'minus')
         _alert_type = high >= _s1 ? 'H' : high >= _price_near ? 'N' : ''
-        if _alert_type == 'H'
-            array.remove(supply_zones_s1_all, i)
-            array.remove(supply_zones_time_all, i)
-
+        _hit = _alert_type == 'H'
         alert_ds(_alert_type=='H' or _alert_type=='N', 'S', _s1, _s1_time, _alert_type)
-        deactivate_ds_limited(_alert_type=='H', 'S', _s1, _s1_time)
-        if high < _s1 and get_pc_diff_abs(high, _s1) > loop_break_pc
-            break
+        deactivate_ds_limited(_hit, 'S', _s1, _s1_time)
+        if _hit
+            array.remove(supply_zones_s1_all, _supply_i)
+            array.remove(supply_zones_time_all, _supply_i)
+        else
+            _supply_i += 1
 
 add_ds_lbl_tooltip(_lbl, _zone_type, _s1, _s1_time) =>
     label.set_tooltip(_lbl, _zone_type == 'D' ? 'Demand Zone' : 'Supply Zone')
 
 draw_nearby_ds_s1() =>
-    if barstate.isconfirmed and (showDemandZone or showSupplyZone)
+    if barstate.isconfirmed and ds_line_max > 0 and (showDemandZone or showSupplyZone)
         // Reset
         _color_transparent = theme_transparent_css
         for i = 0 to ds_line_max - 1
@@ -1528,7 +1597,7 @@ draw_nearby_ds_s1() =>
                 label.set_text(_lbl_demand, str.tostring(_s1))
 
                 _s1_time = array.size(demand_zones_time_all) > i ? array.get(demand_zones_time_all, i) : na
-                add_ds_lbl_tooltip(_lbl_demand, 'S', _s1, _s1_time)
+                add_ds_lbl_tooltip(_lbl_demand, 'D', _s1, _s1_time)
 
                 _line_demand = array.get(demand_zones_line_all, _demand_line_index)
                 line.set_color(_line_demand, ds_demand_border_css)
@@ -1686,10 +1755,10 @@ stratTip        =   "TSI speed control presets. Both speeds correlate to the Bjo
 // ---------> User Input <----------- //
 // ================================== //
 
-left            =   input.int       (20     ,   "Look Left"                     ,   group= "Zones"                , tooltip= leftTip            , display = display.none)    
-right           =   input.int       (15     ,   "Look Right"                    ,   group= "Zones"                , tooltip= rightTip           , display = display.none)    
-nPiv            =   input.int       (1      ,   "Number of Pivots"              ,   group= "Zones"                , tooltip= nPivTip            , display = display.none)
-atrLen          =   input.int       (30     ,   "ATR Length"                    ,   group= "Zones"                , tooltip= atrLenTip          , display = display.none)
+left            =   input.int       (20     ,   "Look Left"                     ,   group= "Zones"                , tooltip= leftTip            , minval= 1, display = display.none)
+right           =   input.int       (15     ,   "Look Right"                    ,   group= "Zones"                , tooltip= rightTip           , minval= 1, display = display.none)
+nPiv            =   input.int       (1      ,   "Number of Pivots"              ,   group= "Zones"                , tooltip= nPivTip            , minval= 1, display = display.none)
+atrLen          =   input.int       (30     ,   "ATR Length"                    ,   group= "Zones"                , tooltip= atrLenTip          , minval= 1, display = display.none)
 mult            =   input.float     (0.5    ,   "Zone Width (ATR)"              ,   group= "Zones"                , tooltip= multTip            ,   step   = 0.1, display = display.none)
 per             =   input.float     (5      ,   "Max Zone Percent"              ,   group= "Zones"                , tooltip= perTip             , display = display.none)
 max             =   input.float     (10     ,   "Max Boxes for Patterns"        ,   group= "Zones"                , tooltip= maxTip             , display = display.none)
@@ -2518,7 +2587,7 @@ else if rsi < rsi[1]
     rsiIndicatorLabel := " RSI         sell "
 
 //Plot Price Difference Table
-infoDataTable = table.new(itablePosition, columns=1, rows=10)
+var table infoDataTable = table.new(itablePosition, columns=1, rows=10)
 if infoDataTableOn and barstate.islast
     table.cell(table_id=infoDataTable, column=0, row=mfiOrder, text=mfiOn ? mfiIndicatorLabel : na, height=0, text_color=dashboard_text_css, text_halign=text.align_left, text_valign=text.align_top, bgcolor=mfiLabel)
     table.cell(table_id=infoDataTable, column=0, row=fisherOrder, text=fisherOn ? fisherIndicatorLabel : na, height=0, text_color=dashboard_text_css, text_halign=text.align_left, text_valign=text.align_top, bgcolor=fisherLabel)
@@ -2637,15 +2706,14 @@ if laststate == 2 and recommendation
         moveOversoldLabel()
 
 // Custom ATR Bands settings
-mal = input(defval=47, title='Half Length', display = display.none)
+mal = input.int(defval=47, title='Half Length', minval=1, display = display.none)
 mva = ta.sma(close, mal)
-atrl = input(defval=89, title='Atr Length', display = display.none)
+atrl = input.int(defval=89, title='Atr Length', minval=1, display = display.none)
 atrv = ta.atr(atrl)
-atrm = input(defval=3.0, title='Atr Multiplier', display = display.none)
+atrm = input.float(defval=3.0, title='Atr Multiplier', minval=0.0, display = display.none)
 pEnv = mva + mva * atrv / close * atrm
 mEnv = mva - mva * atrv / close * atrm
 
 plot(mva, title='Simple Moving Average', linewidth=2)
 plot(pEnv, color=theme_bear_border_css, title='High Envelope', linewidth=2)
 plot(mEnv, color=theme_bull_border_css, title='Low Envelope', linewidth=2)
- 
