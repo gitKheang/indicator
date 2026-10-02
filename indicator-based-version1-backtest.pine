@@ -1219,14 +1219,14 @@ st_htf = input.timeframe('60', 'Higher timeframe structure', group=st_group)
 st_bias_len = input.int(10, 'HTF structural swing length', minval=2, maxval=100, group=st_group)
 st_mode = input.string('Area + structure', 'Entry experiment', options=['Area + structure', 'Area + structure + BULB', 'BULB first appearance'], group=st_group, tooltip='The BULB baseline also uses the same HTF, stop and target qualification. No entry uses the final relocated BULB label.')
 st_expiry = input.int(240, 'Zone lifetime (chart bars)', minval=10, maxval=2000, group=st_group)
-st_confirm_window = input.int(12, 'Confirmation window after touch (bars)', minval=1, maxval=100, group=st_group)
-st_confirmation_anchor = input.string('Internal swing', 'Confirmation anchor', options=['Internal swing', 'Touch candle break'], group=st_group, tooltip='Internal swing preserves the original experiment. Touch candle break requires a later close beyond the first touch candle high/low and outside the area. This earlier confirmation can create more candidates; compare results separately.')
+st_confirm_window = input.int(30, 'Confirmation window after touch (bars)', minval=1, maxval=100, group=st_group)
+st_confirmation_anchor = input.string('Touch candle break', 'Confirmation anchor', options=['Touch candle break', 'Internal swing'], group=st_group, tooltip='Touch candle break requires a later close beyond the first touch candle high/low and outside the area. Internal swing preserves the stricter original experiment.')
 st_stop_buffer_pips = input.float(5.0, 'Structural stop buffer (pips)', minval=0, group=st_group)
 st_tp_buffer_pips = input.float(2.0, 'Exit before target (pips)', minval=0, group=st_group)
 st_cluster_pips = input.float(5.0, 'Merge nearby target levels (pips)', minval=0, group=st_group)
 st_chase_r = input.float(0.75, 'Maximum entry distance from area (R)', minval=0.1, maxval=3, step=0.05, group=st_group)
 st_target_mode = input.string('Structure', 'Exit experiment', options=['Structure', 'Fixed 2R / 3R benchmark'], group=st_group, tooltip='Benchmark retains structural target eligibility; only exit prices change. Never relax entry filters when comparing exits.')
-st_stop_mode = input.string('Fixed original stop', 'Stop-management experiment', options=['Fixed original stop', 'Breakeven after TP1 (next bar)'], group=st_group, tooltip='The default preserves the original 100-pip stop. The breakeven experiment moves only the remaining TP2 half to entry from the bar after TP1; it never changes the TP1 bar retroactively.')
+st_stop_mode = input.string('Close full at TP1', 'Trade-management experiment', options=['Close full at TP1', 'Fixed original stop', 'Breakeven after TP1 (next bar)'], group=st_group, tooltip='Close full at TP1 is the active-turnover benchmark: TP2 must still exist before entry, but the strategy exits the whole position at qualified TP1 so one runner cannot block days of new signals. Fixed original stop preserves the original 50/50 TP1/TP2 test. Breakeven moves only the remaining TP2 half to entry from the bar after TP1.')
 st_cost_pips = input.float(4.0, 'Estimated round-trip costs (pips)', minval=0, group=st_group, tooltip='Research ledger only: spread + commissions + slippage estimate per full position. Configure actual broker costs in Strategy Properties separately. This starting estimate is NOT verified for your broker.')
 st_risk_cash = input.float(100.0, 'Research risk per trade (account currency)', minval=1, group=st_group, tooltip='Constant cash risk for research, not account risk advice. Strategy account and symbol currency must match.')
 st_qty_step = input.float(1.0, 'Tradable quantity increment', minval=0.000001, group=st_group, tooltip='Verify for your broker. Quantity rounds down to an even number of increments for exact 50/50 exits.')
@@ -3025,10 +3025,13 @@ st_process_point(STTrade trade, float price, bool gap) =>
         else
             if not trade.partial and (price - trade.tp1) * trade.side >= 0
                 fillPrice = gap ? price : trade.tp1
-                trade.gross += 0.5 * (fillPrice - trade.entry) * trade.side / st_trade_risk(trade)
-                trade.remaining := 0.5
+                fillSize = st_stop_mode == 'Close full at TP1' ? trade.remaining : 0.5
+                trade.gross += fillSize * (fillPrice - trade.entry) * trade.side / st_trade_risk(trade)
+                trade.remaining := st_stop_mode == 'Close full at TP1' ? 0.0 : 0.5
                 trade.partial := true
-            if (price - trade.tp2) * trade.side >= 0
+                if st_stop_mode == 'Close full at TP1'
+                    trade.side := 0
+            if trade.side != 0 and (price - trade.tp2) * trade.side >= 0
                 fillPrice = gap ? price : trade.tp2
                 trade.gross += trade.remaining * (fillPrice - trade.entry) * trade.side / st_trade_risk(trade)
                 trade.remaining := 0.0
@@ -3409,8 +3412,11 @@ if barstate.isconfirmed
         strategy.entry('Smart Trade', side == 1 ? strategy.long : strategy.short, qty=st_signal_qty, alert_message='RESEARCH ONLY: confirmation-close execution assumption')
         // Freeze the qualified stop distance for either initial-stop model.
         riskTicks = math.round(math.abs(close - st_signal_sl) / syminfo.mintick)
-        strategy.exit('TP1 / SL', 'Smart Trade', qty=st_signal_qty * 0.5, limit=st_signal_t1, loss=riskTicks)
-        strategy.exit('TP2 / SL', 'Smart Trade', qty=st_signal_qty * 0.5, limit=st_signal_t2, loss=riskTicks)
+        if st_stop_mode == 'Close full at TP1'
+            strategy.exit('TP1 / SL', 'Smart Trade', qty=st_signal_qty, limit=st_signal_t1, loss=riskTicks)
+        else
+            strategy.exit('TP1 / SL', 'Smart Trade', qty=st_signal_qty * 0.5, limit=st_signal_t1, loss=riskTicks)
+            strategy.exit('TP2 / SL', 'Smart Trade', qty=st_signal_qty * 0.5, limit=st_signal_t2, loss=riskTicks)
     else if st_buy_signal or st_sell_signal
         st_native_divergence += 1
     // A TP1 fill is discovered at this close. Updating the remaining order

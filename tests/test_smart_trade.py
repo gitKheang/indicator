@@ -55,7 +55,7 @@ class SourceContract(unittest.TestCase):
         engine = (ROOT / 'modules/smart_trade_engine.pine').read_text()
         for name in ['st_target_pair', 'st_plan', 'st_prepare_trade_bar', 'st_trade_risk', 'st_cost_r', 'st_process_point', 'st_step_zone', 'st_zone_confirmable']:
             self.assertIn(build.function_block(engine, name), fixture)
-        self.assertEqual(fixture.count('    st_assert('), 63)
+        self.assertEqual(fixture.count('    st_assert('), 64)
 
     def test_native_entry_fill_guard(self):
         adapter = (ROOT / 'modules/smart_trade_execution.pine').read_text()
@@ -64,6 +64,8 @@ class SourceContract(unittest.TestCase):
             self.assertIn(f'strategy.{state}.entry_bar_index(', adapter)
         self.assertIn('runtime.error(', adapter)
         self.assertIn('st_native_expected_entry := close', adapter)
+        self.assertIn("st_stop_mode == 'Close full at TP1'", adapter)
+        self.assertIn("qty=st_signal_qty, limit=st_signal_t1", adapter)
         self.assertIn("st_stop_mode == 'Breakeven after TP1 (next bar)'", adapter)
         self.assertIn("limit=st_trade.tp2, stop=st_trade.entry", adapter)
         self.assertNotIn(' - st_trade.entry', adapter)

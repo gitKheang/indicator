@@ -173,10 +173,13 @@ st_process_point(STTrade trade, float price, bool gap) =>
         else
             if not trade.partial and (price - trade.tp1) * trade.side >= 0
                 fillPrice = gap ? price : trade.tp1
-                trade.gross += 0.5 * (fillPrice - trade.entry) * trade.side / st_trade_risk(trade)
-                trade.remaining := 0.5
+                fillSize = st_stop_mode == 'Close full at TP1' ? trade.remaining : 0.5
+                trade.gross += fillSize * (fillPrice - trade.entry) * trade.side / st_trade_risk(trade)
+                trade.remaining := st_stop_mode == 'Close full at TP1' ? 0.0 : 0.5
                 trade.partial := true
-            if (price - trade.tp2) * trade.side >= 0
+                if st_stop_mode == 'Close full at TP1'
+                    trade.side := 0
+            if trade.side != 0 and (price - trade.tp2) * trade.side >= 0
                 fillPrice = gap ? price : trade.tp2
                 trade.gross += trade.remaining * (fillPrice - trade.entry) * trade.side / st_trade_risk(trade)
                 trade.remaining := 0.0

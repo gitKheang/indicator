@@ -4,13 +4,14 @@ Status: historical evidence for the first-version configuration on 2026-10-02, N
 These observations are validation evidence, not proof of a trading edge.
 
 Follow-up: current local generation/source tests pass (8 tests). The generated
-fixture now contains 63 assertions for structural stops, reclaim resets and
-the optional touch-candle confirmation anchor. Its current TradingView run,
-full indicator/strategy compilation and same-period frequency comparison are
-pending. Text-transfer failures and a TradingView error-code-5 page crash
-prevented completing that validation. The prior 42-assertion result below must
-not be attributed to the new fixture. No increase in accepted positions has
-yet been established for the new confirmation option.
+fixture now contains 64 assertions for structural stops, reclaim resets, the
+touch-candle confirmation anchor and the close-full-at-TP1 turnover mode. Its
+current TradingView run, full indicator/strategy compilation and same-period
+frequency comparison are pending. Text-transfer failures and a TradingView
+error-code-5 page crash prevented completing that validation. The prior
+42-assertion result below must not be attributed to the new fixture. No
+historical increase in accepted positions has yet been established for the
+active-turnover defaults.
 
 The baseline used standard OANDA:XAUUSD candles, HTF 60, pip 0.10,
 `Area + structure`, structure targets, zero native slippage, close execution

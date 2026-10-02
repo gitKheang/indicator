@@ -66,6 +66,11 @@ if barstate.isfirst
     winner = STTrade.new(1, 0, 100, 90, 122, 135, 10)
     st_process_point(winner, 140, false)
     st_assert(winner.completedTP2 and st_near(winner.gross, 2.85), 'two targets weighted correctly')
+    st_stop_mode := 'Close full at TP1'
+    scalp = STTrade.new(1, 0, 100, 90, 122, 135, 10)
+    st_process_point(scalp, 122, false)
+    st_assert(scalp.side == 0 and scalp.partial and st_near(scalp.gross, 2.2) and scalp.remaining == 0, 'full TP1 exit frees the next setup')
+    st_stop_mode := 'Fixed original stop'
     gapLoser = STTrade.new(1, 0, 100, 90, 122, 135, 10)
     st_process_point(gapLoser, 80, true)
     st_assert(st_near(gapLoser.gross, -2), 'gap loss is not falsely capped at 1R')

@@ -30,8 +30,11 @@ if barstate.isconfirmed
         strategy.entry('Smart Trade', side == 1 ? strategy.long : strategy.short, qty=st_signal_qty, alert_message='RESEARCH ONLY: confirmation-close execution assumption')
         // Freeze the qualified stop distance for either initial-stop model.
         riskTicks = math.round(math.abs(close - st_signal_sl) / syminfo.mintick)
-        strategy.exit('TP1 / SL', 'Smart Trade', qty=st_signal_qty * 0.5, limit=st_signal_t1, loss=riskTicks)
-        strategy.exit('TP2 / SL', 'Smart Trade', qty=st_signal_qty * 0.5, limit=st_signal_t2, loss=riskTicks)
+        if st_stop_mode == 'Close full at TP1'
+            strategy.exit('TP1 / SL', 'Smart Trade', qty=st_signal_qty, limit=st_signal_t1, loss=riskTicks)
+        else
+            strategy.exit('TP1 / SL', 'Smart Trade', qty=st_signal_qty * 0.5, limit=st_signal_t1, loss=riskTicks)
+            strategy.exit('TP2 / SL', 'Smart Trade', qty=st_signal_qty * 0.5, limit=st_signal_t2, loss=riskTicks)
     else if st_buy_signal or st_sell_signal
         st_native_divergence += 1
     // A TP1 fill is discovered at this close. Updating the remaining order

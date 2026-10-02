@@ -42,7 +42,7 @@ st_qty_step = 0.001
 st_target_mode = 'Structure'
 st_stop_mode = 'Fixed original stop'
 st_expiry = 240
-st_confirm_window = 12
+st_confirm_window = 30
 st_confirmation_anchor = 'Internal swing'
 '''
     prefix += types[types.index('type STZone'):types.index('st_register(')]
