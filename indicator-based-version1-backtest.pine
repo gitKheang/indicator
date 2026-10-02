@@ -2,12 +2,14 @@
 // Join our channel for more free tools: https://t.me/simpleforextools
 
 //@version=5
-indicator(title = "SMC & ICT & Indicators + Scalping Master"
-  , overlay = true
-  , max_labels_count = 500
-  , max_lines_count = 500
-  , max_boxes_count = 500
-  , max_bars_back = 5000)
+strategy(title = "SMC & ICT + Smart Trade Research Strategy"
+  , overlay = true, max_labels_count = 500, max_lines_count = 500
+  , max_boxes_count = 500, max_bars_back = 5000, pyramiding = 0
+  , initial_capital = 100000, default_qty_type = strategy.fixed
+  , commission_type = strategy.commission.percent, commission_value = 0
+  , slippage = 0, process_orders_on_close = true
+  , calc_on_order_fills = false, calc_on_every_tick = false
+  , use_bar_magnifier = false, margin_long = 100, margin_short = 100)
 //-----------------------------------------------------------------------------{
 //Constants
 //-----------------------------------------------------------------------------{
@@ -3375,5 +3377,48 @@ alertcondition(st_sell_signal, 'Smart Trade: confirmed SELL', 'Close-confirmed S
 // END SMART TRADE ENGINE
 
 // BEGIN SMART TRADE EXECUTION
-// Indicator only: the research ledger above is not a broker fill report.
+// Native broker-emulator companion. No real broker orders are submitted.
+// Keep the declaration's close-fill / OHLC settings for ledger parity tests.
+// Late/slipped entries fail explicitly; they were not qualified by this model.
+// Magnifier exit sensitivity can diverge from the OHLC research ledger.
+var int st_native_divergence = 0
+var float st_native_expected_entry = na
+var int st_native_expected_bar = na
+if barstate.isconfirmed
+    // This research model qualifies targets at the confirmation close. A
+    // changed Properties fill model must not silently turn a qualified 2R
+    // entry into an unqualified later/slipped entry. Check both open trades
+    // and trades that opened and closed between two script evaluations.
+    if strategy.opentrades > 0
+        fillChanged = na(st_native_expected_entry) or math.abs(strategy.opentrades.entry_price(0) - st_native_expected_entry) > syminfo.mintick * 0.1 or strategy.opentrades.entry_bar_index(0) != st_native_expected_bar
+        if fillChanged
+            runtime.error('Smart Trade: entry fill differs from qualified confirmation close. Restore On bar close and zero slippage. This run is not eligible for the fixed-SL/2R comparison.')
+    if strategy.closedtrades > nz(strategy.closedtrades[1])
+        for leg = nz(strategy.closedtrades[1]) to strategy.closedtrades - 1
+            fillChanged = na(st_native_expected_entry) or math.abs(strategy.closedtrades.entry_price(leg) - st_native_expected_entry) > syminfo.mintick * 0.1 or strategy.closedtrades.entry_bar_index(leg) != st_native_expected_bar
+            if fillChanged
+                runtime.error('Smart Trade: closed trade entry differs from qualified confirmation close. Restore On bar close and zero slippage; discard this run.')
+    if st_exit_event and strategy.position_size != 0
+        st_native_divergence += 1
+    if (st_buy_signal or st_sell_signal) and strategy.position_size == 0
+        side = st_buy_signal ? 1 : -1
+        // Retain the submitted order's own snapshot. The ledger may already
+        // have advanced to another plan after an exit-model divergence.
+        st_native_expected_entry := close
+        st_native_expected_bar := bar_index
+        strategy.entry('Smart Trade', side == 1 ? strategy.long : strategy.short, qty=st_signal_qty, alert_message='RESEARCH ONLY: confirmation-close execution assumption')
+        // Freeze the qualified stop distance for either initial-stop model.
+        riskTicks = math.round(math.abs(close - st_signal_sl) / syminfo.mintick)
+        strategy.exit('TP1 / SL', 'Smart Trade', qty=st_signal_qty * 0.5, limit=st_signal_t1, loss=riskTicks)
+        strategy.exit('TP2 / SL', 'Smart Trade', qty=st_signal_qty * 0.5, limit=st_signal_t2, loss=riskTicks)
+    else if st_buy_signal or st_sell_signal
+        st_native_divergence += 1
+    // A TP1 fill is discovered at this close. Updating the remaining order
+    // here makes breakeven active for the next bar, matching the research
+    // ledger without rewriting the TP1 candle's already-completed path.
+    if st_stop_mode == 'Breakeven after TP1 (next bar)' and st_just_tp1 and st_trade.side != 0 and strategy.position_size != 0
+        strategy.exit('TP2 / SL', 'Smart Trade', qty=st_trade.qty * 0.5, limit=st_trade.tp2, stop=st_trade.entry)
+    if (barstate.islast or barstate.islastconfirmedhistory) and st_panel
+        table.cell(st_table, 0, 9, 'Native fills / divergence flags', text_color=theme_text_css)
+        table.cell(st_table, 1, 9, str.tostring(strategy.closedtrades) + ' legs / ' + str.tostring(st_native_divergence), text_color=theme_text_css)
 // END SMART TRADE EXECUTION

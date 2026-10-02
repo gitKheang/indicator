@@ -1,0 +1,121 @@
+// Additive research module. No changes to the legacy engines' state.
+st_group = 'Smart Trade | Research'
+st_enabled = input.bool(true, 'Enable locked trade areas', group=st_group)
+st_pip = input.float(0.10, 'Price distance per pip', minval=0.00000001, group=st_group, tooltip='Explicit convention, not syminfo.mintick. At 0.10, 100 pips = 10.00 price units. Confirm for your symbol before enabling signals.')
+st_pip_confirmed = input.bool(true, 'I verified the pip size for this symbol', group=st_group)
+st_pip_symbol = input.string('XAUUSD', 'Symbol using this pip convention', group=st_group, tooltip='Signals disabled unless the chart ticker contains this nonempty identifier. User confirmed XAUUSD: 100 pips = 10.00.')
+st_stop_model = input.string('Fixed 100 pips', 'Initial stop experiment', options=['Fixed 100 pips', 'Structure + buffer'], group=st_group, tooltip='Fixed preserves the original experiment. Structure uses the zone/touch wick plus buffer, with variable pip distance and quantity adjusted to the same cash-risk budget. This changes entry eligibility; compare separately.')
+st_min_stop_pips = input.float(20.0, 'Structure mode: minimum stop (pips)', minval=1, group=st_group)
+st_max_stop_pips = input.float(500.0, 'Structure mode: maximum stop (pips)', minval=1, group=st_group, tooltip='Reject wider stops. At the XAUUSD convention 500 pips = 50.00 price distance; this is a research limit, not an optimized value.')
+st_htf = input.timeframe('60', 'Higher timeframe structure', group=st_group)
+st_bias_len = input.int(10, 'HTF structural swing length', minval=2, maxval=100, group=st_group)
+st_mode = input.string('Area + structure', 'Entry experiment', options=['Area + structure', 'Area + structure + BULB', 'BULB first appearance'], group=st_group, tooltip='The BULB baseline also uses the same HTF, stop and target qualification. No entry uses the final relocated BULB label.')
+st_expiry = input.int(240, 'Zone lifetime (chart bars)', minval=10, maxval=2000, group=st_group)
+st_confirm_window = input.int(12, 'Confirmation window after touch (bars)', minval=1, maxval=100, group=st_group)
+st_confirmation_anchor = input.string('Internal swing', 'Confirmation anchor', options=['Internal swing', 'Touch candle break'], group=st_group, tooltip='Internal swing preserves the original experiment. Touch candle break requires a later close beyond the first touch candle high/low and outside the area. This earlier confirmation can create more candidates; compare results separately.')
+st_stop_buffer_pips = input.float(5.0, 'Structural stop buffer (pips)', minval=0, group=st_group)
+st_tp_buffer_pips = input.float(2.0, 'Exit before target (pips)', minval=0, group=st_group)
+st_cluster_pips = input.float(5.0, 'Merge nearby target levels (pips)', minval=0, group=st_group)
+st_chase_r = input.float(0.75, 'Maximum entry distance from area (R)', minval=0.1, maxval=3, step=0.05, group=st_group)
+st_target_mode = input.string('Structure', 'Exit experiment', options=['Structure', 'Fixed 2R / 3R benchmark'], group=st_group, tooltip='Benchmark retains structural target eligibility; only exit prices change. Never relax entry filters when comparing exits.')
+st_stop_mode = input.string('Fixed original stop', 'Stop-management experiment', options=['Fixed original stop', 'Breakeven after TP1 (next bar)'], group=st_group, tooltip='The default preserves the original 100-pip stop. The breakeven experiment moves only the remaining TP2 half to entry from the bar after TP1; it never changes the TP1 bar retroactively.')
+st_cost_pips = input.float(4.0, 'Estimated round-trip costs (pips)', minval=0, group=st_group, tooltip='Research ledger only: spread + commissions + slippage estimate per full position. Configure actual broker costs in Strategy Properties separately. This starting estimate is NOT verified for your broker.')
+st_risk_cash = input.float(100.0, 'Research risk per trade (account currency)', minval=1, group=st_group, tooltip='Constant cash risk for research, not account risk advice. Strategy account and symbol currency must match.')
+st_qty_step = input.float(1.0, 'Tradable quantity increment', minval=0.000001, group=st_group, tooltip='Verify for your broker. Quantity rounds down to an even number of increments for exact 50/50 exits.')
+st_date_start = input.time(timestamp('01 Jan 2020 00:00 +0000'), 'Research start', group=st_group)
+st_date_end = input.time(timestamp('01 Jan 2030 00:00 +0000'), 'Research end (no forced exit)', group=st_group)
+st_show = input.bool(true, 'Show areas, decisions and trade levels', group=st_group)
+st_panel = input.bool(true, 'Show research status panel', group=st_group)
+st_keep = input.int(30, 'Keep recent decision drawings', minval=5, maxval=50, group=st_group)
+
+// State: 0 available, 1 locked, 2 touched, 3 used, 4 invalid,
+// 5 expired, 6 rejected, 7 tested before selection. Terminal states never rearm.
+type STZone
+    int id
+    int side
+    int origin
+    int born
+    float top
+    float bottom
+    float rawTop
+    float rawBottom
+    int state = 0
+    int touched = na
+    float trigger = na
+    float extreme = na
+    bool bulb = false
+    string reason = 'Available'
+    box drawing = na
+    bool fresh = true
+    bool valid = true
+    int bornTime = na
+    int selectedTime = na
+    int touchTime = na
+    int confirmedTime = na
+
+type STLevel
+    int side
+    float nearPrice
+    float farPrice
+    string source
+    int born
+
+type STTrade
+    int side = 0
+    int born = na
+    float entry = na
+    float stop = na
+    float tp1 = na
+    float tp2 = na
+    float qty = na
+    float remaining = 1.0
+    float gross = 0.0
+    bool partial = false
+    bool ambiguous = false
+    bool completedTP2 = false
+    float initialRisk = na // Frozen price distance; survives a breakeven move.
+
+var st_zones = array.new<STZone>()
+var st_levels = array.new<STLevel>()
+var st_labels = array.new_label()
+var st_boxes = array.new_box()
+var st_lines = array.new_line()
+var st_events = array.new_int(2, 0) // capacity rejections, closed trade count
+
+st_register(int side, int origin, float zoneTop, float zoneBottom, float rawTop, float rawBottom) =>
+    if st_enabled and not na(origin) and not na(zoneTop) and not na(zoneBottom) and zoneTop > zoneBottom
+        bool duplicate = false
+        for z in st_zones
+            if z.origin == origin and z.side == side
+                duplicate := true
+        if not duplicate
+            // Never evict a live selected area to make room. Expired entries are
+            // pruned by the engine; a saturated registry refuses new candidates.
+            if array.size(st_zones) < 400
+                newZone = STZone.new(origin * 2 + (side == 1 ? 1 : 0), side, origin, bar_index, zoneTop, zoneBottom, rawTop, rawBottom)
+                newZone.bornTime := time_close
+                array.push(st_zones, newZone)
+            else
+                array.set(st_events, 0, array.get(st_events, 0) + 1)
+
+st_note(float price, string message, color tint, bool down) =>
+    if st_show
+        mark = label.new(time, price, array.get(str.split(message, '\n'), 0), xloc=xloc.bar_time, style=down ? label.style_label_down : label.style_label_up, color=tint, textcolor=color.white, size=size.tiny)
+        label.set_tooltip(mark, message)
+        array.push(st_labels, mark)
+        if array.size(st_labels) > st_keep
+            label.delete(array.shift(st_labels))
+
+st_finish(STZone z, int state, string reason) =>
+    z.state := state
+    z.reason := reason
+    if state == 3
+        z.confirmedTime := time_close
+    if not na(z.drawing)
+        box.set_right(z.drawing, time_close)
+        box.set_extend(z.drawing, extend.none)
+        box.set_bgcolor(z.drawing, color.new(color.gray, 94))
+        box.set_border_style(z.drawing, line.style_dotted)
+        box.set_text(z.drawing, (z.side == 1 ? 'Demand ' : 'Supply ') + reason)
+    if state != 3
+        st_note(z.side == 1 ? z.bottom : z.top, reason, color.gray, z.side == -1)

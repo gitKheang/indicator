@@ -1,0 +1,524 @@
+// Canonical engine: embedded unchanged into indicator and strategy.
+// Close-confirmed decisions. Research entry assumption: signal close, zero
+// entry slippage; native strategy uses the identical close-fill assumption.
+st_bias_snapshot(int swingLength) =>
+    [sHigh, sLow] = swings(swingLength)
+    var float lastHigh = na
+    var float lastLow = na
+    var bool highBroken = false
+    var bool lowBroken = false
+    var int bias = 0
+    if sHigh > 0
+        lastHigh := sHigh
+        highBroken := false
+    if sLow > 0
+        lastLow := sLow
+        lowBroken := false
+    if not highBroken and not na(lastHigh) and close > lastHigh and close[1] <= lastHigh
+        bias := 1
+        highBroken := true
+    if not lowBroken and not na(lastLow) and close < lastLow and close[1] >= lastLow
+        bias := -1
+        lowBroken := true
+    bias[1]
+
+st_htf_bias = request.security(syminfo.tickerid, st_htf, st_bias_snapshot(st_bias_len), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+[st_dh, st_dl, st_dt] = request.security(syminfo.tickerid, 'D', [high[1], low[1], time[1]], lookahead=barmerge.lookahead_on)
+[st_wh, st_wl, st_wt] = request.security(syminfo.tickerid, 'W', [high[1], low[1], time[1]], lookahead=barmerge.lookahead_on)
+[st_mh, st_ml, st_mt] = request.security(syminfo.tickerid, 'M', [high[1], low[1], time[1]], lookahead=barmerge.lookahead_on)
+st_risk = 100.0 * st_pip
+st_risk_ticks = math.round(st_risk / syminfo.mintick)
+st_selection_risk = st_stop_model == 'Fixed 100 pips' ? st_risk : st_max_stop_pips * st_pip
+st_stop_buffer = math.ceil(st_stop_buffer_pips * st_pip / syminfo.mintick) * syminfo.mintick
+st_target_buffer = math.ceil(st_tp_buffer_pips * st_pip / syminfo.mintick) * syminfo.mintick
+st_merge = math.max(syminfo.mintick, st_cluster_pips * st_pip)
+st_chart_ok = chart.is_standard and timeframe.isintraday and timeframe.in_seconds() < timeframe.in_seconds(st_htf)
+st_units_ok = st_pip_confirmed and str.length(st_pip_symbol) > 0 and str.contains(syminfo.ticker, st_pip_symbol) and st_risk_ticks >= 1 and math.abs(st_risk_ticks * syminfo.mintick - st_risk) < syminfo.mintick * 0.0001
+st_stop_config_ok = st_stop_model == 'Fixed 100 pips' or st_min_stop_pips <= st_max_stop_pips
+st_config_ok = st_enabled and st_chart_ok and st_units_ok and st_stop_config_ok and st_date_end > st_date_start
+st_in_dates = time >= st_date_start and time_close <= st_date_end
+st_rsi = ta.rsi(close, 13)
+
+st_add_level(int side, float nearPrice, float farPrice, string source) =>
+    // A level already taken on its publication bar is not fresh liquidity.
+    valid = not na(nearPrice) and (side == 1 ? nearPrice > high : nearPrice < low)
+    if valid
+        if array.size(st_levels) < 256
+            array.push(st_levels, STLevel.new(side, nearPrice, farPrice, source, bar_index))
+        else
+            array.set(st_events, 0, array.get(st_events, 0) + 1)
+
+st_period_levels(float periodHigh, float periodLow, string name) =>
+    int i = array.size(st_levels) - 1
+    while i >= 0
+        item = array.get(st_levels, i)
+        if item.source == name + ' High' or item.source == name + ' Low'
+            array.remove(st_levels, i)
+        i -= 1
+    st_add_level(1, periodHigh, periodHigh, name + ' High')
+    st_add_level(-1, periodLow, periodLow, name + ' Low')
+
+st_target_pair(int side, float entry) =>
+    candidates = array.new<STLevel>()
+    distances = array.new_float()
+    for level in st_levels
+        if level.side == side and (level.nearPrice - entry) * side > 0
+            array.push(candidates, level)
+            array.push(distances, (level.nearPrice - entry) * side)
+    for zone in st_zones
+        if zone.side == -side and zone.valid
+            nearPrice = side == 1 ? zone.bottom : zone.top
+            farPrice = side == 1 ? zone.top : zone.bottom
+            if (nearPrice - entry) * side > 0
+                zoneName = (side == 1 ? 'Supply' : 'Demand') + (zone.fresh ? ' (fresh)' : ' (tested)')
+                array.push(candidates, STLevel.new(side, nearPrice, farPrice, zoneName, zone.born))
+                array.push(distances, (nearPrice - entry) * side)
+    float first = na
+    float second = na
+    float clusterFar = na
+    string firstName = ''
+    string secondName = ''
+    sorted = array.sort_indices(distances, order.ascending)
+    for index in sorted
+        level = array.get(candidates, index)
+        if na(first)
+            first := level.nearPrice
+            firstName := level.source
+            clusterFar := level.farPrice * side
+        else if level.nearPrice * side <= clusterFar + st_merge
+            clusterFar := math.max(clusterFar, level.farPrice * side)
+        else
+            second := level.nearPrice
+            secondName := level.source
+            break
+    // Round toward entry so tick rounding cannot manufacture extra reward.
+    t1 = na(first) ? na : (side == 1 ? math.floor((first - st_target_buffer) / syminfo.mintick) : math.ceil((first + st_target_buffer) / syminfo.mintick)) * syminfo.mintick
+    t2 = na(second) ? na : (side == 1 ? math.floor((second - st_target_buffer) / syminfo.mintick) : math.ceil((second + st_target_buffer) / syminfo.mintick)) * syminfo.mintick
+    [t1, t2, firstName, secondName]
+
+st_plan(int side, float entry, float invalidation, float proximal, bool baseline) =>
+    [first, second, firstName, secondName] = st_target_pair(side, entry)
+    sl = math.round_to_mintick(entry - side * st_risk)
+    structural = st_stop_model == 'Structure + buffer'
+    if structural
+        distance = math.max((entry - invalidation) * side + st_stop_buffer, st_min_stop_pips * st_pip)
+        rawStop = entry - side * distance
+        // Round away from entry to preserve the full structural buffer.
+        sl := (side == 1 ? math.floor(rawStop / syminfo.mintick) : math.ceil(rawStop / syminfo.mintick)) * syminfo.mintick
+    risk = (entry - sl) * side
+    rr = (first - entry) * side / risk
+    qty = syminfo.pointvalue > 0 and risk > 0 ? math.floor(st_risk_cash / (risk * syminfo.pointvalue) / (2 * st_qty_step)) * (2 * st_qty_step) : 0.0
+    string reason = ''
+    bool insideOpposing = false
+    for zone in st_zones
+        if zone.side == -side and zone.valid and entry >= zone.bottom and entry <= zone.top
+            insideOpposing := true
+    if insideOpposing
+        reason := 'Entry inside opposing Demand/Supply'
+    else if na(invalidation) or na(risk) or risk <= 0 or (invalidation - sl) * side < st_stop_buffer - syminfo.mintick * 0.0001
+        reason := structural ? 'Invalid structural stop' : '100-pip SL fails structure'
+    else if structural and (st_min_stop_pips > st_max_stop_pips or risk > st_max_stop_pips * st_pip + syminfo.mintick * 0.0001)
+        reason := 'Structural stop exceeds maximum'
+    else if not baseline and (entry - proximal) * side > st_chase_r * risk
+        reason := 'Confirmation too far from area'
+    else if na(first)
+        reason := 'No TP1'
+    else if rr < 2.0 - 0.0000001
+        reason := 'Nearest TP1 below 2R'
+    else if na(second) or (second - first) * side <= st_merge
+        reason := 'No distinct TP2'
+    else if qty <= 0
+        reason := 'Quantity too small for two exits'
+    else if array.get(st_events, 0) > 0
+        reason := 'Registry capacity: fail closed'
+    if st_target_mode == 'Fixed 2R / 3R benchmark'
+        first := math.round_to_mintick(entry + side * 2 * risk)
+        second := math.round_to_mintick(entry + side * 3 * risk)
+        firstName := 'Fixed 2R benchmark'
+        secondName := 'Fixed 3R benchmark'
+    [sl, first, second, qty, reason, firstName, secondName]
+
+st_trade_level(float price, color tint, string name) =>
+    if st_show
+        ln = line.new(time_close, price, time_close + int(timeframe.in_seconds() * 1000), price, xloc=xloc.bar_time, extend=extend.right, color=tint, style=line.style_dashed)
+        array.push(st_lines, ln)
+        // Exactly one current/last plan; historical prices remain in entry tooltip.
+        if array.size(st_lines) > 4
+            line.delete(array.shift(st_lines))
+
+// Fill model for the indicator research ledger. This mirrors the native
+// emulator's OHLC path when Bar Magnifier is OFF. At equal distance use low
+// first; such trades are flagged as ambiguous, not treated as proof of edge.
+st_prepare_trade_bar(STTrade trade) =>
+    // TP1 is only known after its candle has completed in this close-based
+    // model. Activate breakeven on the following candle so the experiment
+    // cannot retroactively improve the intrabar TP1 outcome.
+    if trade.side != 0 and trade.partial and st_stop_mode == 'Breakeven after TP1 (next bar)'
+        trade.stop := trade.entry
+
+st_trade_risk(STTrade trade) =>
+    // Legacy synthetic fixtures may omit the snapshot; real entries set it.
+    nz(trade.initialRisk, st_risk)
+
+st_cost_r(float risk) =>
+    st_cost_pips * st_pip / risk
+
+st_process_point(STTrade trade, float price, bool gap) =>
+    if trade.side != 0
+        if (price - trade.stop) * trade.side <= 0
+            fillPrice = gap ? price : trade.stop
+            trade.gross += trade.remaining * (fillPrice - trade.entry) * trade.side / st_trade_risk(trade)
+            trade.remaining := 0.0
+            trade.side := 0
+        else
+            if not trade.partial and (price - trade.tp1) * trade.side >= 0
+                fillPrice = gap ? price : trade.tp1
+                trade.gross += 0.5 * (fillPrice - trade.entry) * trade.side / st_trade_risk(trade)
+                trade.remaining := 0.5
+                trade.partial := true
+            if (price - trade.tp2) * trade.side >= 0
+                fillPrice = gap ? price : trade.tp2
+                trade.gross += trade.remaining * (fillPrice - trade.entry) * trade.side / st_trade_risk(trade)
+                trade.remaining := 0.0
+                trade.side := 0
+                trade.completedTP2 := true
+
+// Pure lifecycle transition over an existing snapshot. Keeping OHLC, bias,
+// time and structural anchors explicit makes the production rules testable.
+st_step_zone(STZone z, int idx, int closedAt, float hi, float lo, float cl, float prevClose, int bias, float priorHigh, float priorLow, float rsi) =>
+    bool touchEvent = false
+    if idx > z.born
+        crossed = z.side == 1 ? cl < z.rawBottom : cl > z.rawTop
+        touchedNow = z.side == 1 ? lo <= z.top : hi >= z.bottom
+        z.fresh := z.fresh and not touchedNow
+        z.valid := z.valid and not crossed and idx - z.born <= st_expiry
+        if z.state <= 2
+            if crossed
+                z.state := 4
+                z.reason := 'Invalidated'
+            else if idx - z.born > st_expiry
+                z.state := 5
+                z.reason := 'Expired'
+            else if z.state > 0 and (na(bias) or bias != z.side)
+                z.state := 6
+                z.reason := 'HTF bias no longer aligned'
+            else if z.state == 0 and touchedNow
+                z.state := 7
+                z.reason := 'Tested before selection'
+            else if z.state == 1 and touchedNow
+                z.state := 2
+                z.touched := idx
+                z.touchTime := closedAt
+                z.trigger := st_confirmation_anchor == 'Touch candle break' ? (z.side == 1 ? hi : lo) : (z.side == 1 ? priorHigh : priorLow)
+                z.extreme := z.side == 1 ? math.min(z.rawBottom, lo) : math.max(z.rawTop, hi)
+                z.bulb := z.side == 1 ? rsi <= 30 : rsi >= 65
+                z.reason := 'Touched: awaiting close break'
+                touchEvent := true
+                if na(z.trigger)
+                    z.state := 6
+                    z.reason := 'No confirmed internal swing'
+                // A touch that closes back through the anchor resets the
+                // break. Its later reclaim is a valid post-touch confirmation,
+                // even when the candle before the touch was beyond the anchor.
+                else if z.side == 1 ? prevClose > z.trigger and cl > z.trigger : prevClose < z.trigger and cl < z.trigger
+                    z.state := 6
+                    z.reason := 'Structure already broken before touch'
+            else if z.state == 2
+                z.extreme := z.side == 1 ? math.min(z.extreme, lo) : math.max(z.extreme, hi)
+                z.bulb := z.bulb or (z.side == 1 ? rsi <= 30 : rsi >= 65)
+                if idx - z.touched > st_confirm_window
+                    z.state := 5
+                    z.reason := 'Confirmation expired'
+    touchEvent
+
+st_zone_confirmable(STZone z, int idx, float cl, float rsi, bool requireBulb) =>
+    broken = z.side == 1 ? cl > z.trigger and cl > z.top : cl < z.trigger and cl < z.bottom
+    recovered = z.side == 1 ? rsi > 30 : rsi < 65
+    z.state == 2 and idx > z.touched and broken and (not requireBulb or (z.bulb and recovered))
+
+var STTrade st_trade = STTrade.new()
+var int st_bulb_state = 0
+var float st_sum_r = 0.0
+var float st_peak_r = 0.0
+var float st_drawdown_r = 0.0
+var int st_wins = 0
+var int st_tp1_count = 0
+var int st_tp2_count = 0
+var int st_ambiguous_count = 0
+var int st_rejected_count = 0
+var int st_selected_count = 0
+// Diagnostics count events once on confirmed candles. They do not qualify
+// trades or alter lifecycle rules. Final-plan vetoes and earlier cancellations
+// are separate populations; previously the panel displayed only the former.
+var int st_touch_count = 0
+var int st_confirmation_count = 0
+var int st_invalid_count = 0
+var int st_expired_count = 0
+var int st_cancelled_count = 0
+var int st_occupied_bars = 0
+var int st_window_bars = 0
+var int st_window_first = na
+var int st_window_last = na
+var int st_loaded_first = time
+var st_rejection_names = array.new_string()
+var st_rejection_counts = array.new_int()
+
+st_record_rejection(string reason) =>
+    slot = array.indexof(st_rejection_names, reason)
+    if slot < 0
+        array.push(st_rejection_names, reason)
+        array.push(st_rejection_counts, 1)
+    else
+        array.set(st_rejection_counts, slot, array.get(st_rejection_counts, slot) + 1)
+
+var string st_last_reason = 'Waiting for confirmed data'
+var string st_last_sources = ''
+bool st_buy_signal = false
+bool st_sell_signal = false
+bool st_area_event = false
+bool st_touch_event = false
+bool st_exit_event = false
+bool st_just_tp1 = false
+bool st_just_tp2 = false
+float st_signal_sl = na
+float st_signal_t1 = na
+float st_signal_t2 = na
+float st_signal_qty = na
+
+if barstate.isconfirmed and st_in_dates
+    st_window_first := na(st_window_first) ? time : st_window_first
+    st_window_last := time_close
+    st_window_bars += 1
+    if st_trade.side != 0
+        st_occupied_bars += 1
+
+if st_enabled and barstate.isconfirmed
+    // 1. Settle prior trade before making this bar's close decision. No
+    // exits on an entry bar: that entry is explicitly assumed at its CLOSE.
+    if st_trade.side != 0 and bar_index > st_trade.born
+        st_prepare_trade_bar(st_trade)
+        wasPartial = st_trade.partial
+        sideBefore = st_trade.side
+        hitStop = sideBefore == 1 ? low <= st_trade.stop : high >= st_trade.stop
+        hitTarget = sideBefore == 1 ? high >= (wasPartial ? st_trade.tp2 : st_trade.tp1) : low <= (wasPartial ? st_trade.tp2 : st_trade.tp1)
+        st_trade.ambiguous := st_trade.ambiguous or (hitStop and hitTarget)
+        st_process_point(st_trade, open, true)
+        highFirst = math.abs(open - high) < math.abs(open - low)
+        st_process_point(st_trade, highFirst ? high : low, false)
+        st_process_point(st_trade, highFirst ? low : high, false)
+        st_process_point(st_trade, close, false)
+        st_just_tp1 := not wasPartial and st_trade.partial
+        st_just_tp2 := st_trade.completedTP2
+        if st_just_tp1
+            st_tp1_count += 1
+        if st_just_tp2
+            st_tp2_count += 1
+        if st_trade.side == 0
+            st_exit_event := true
+            netR = st_trade.gross - st_cost_r(st_trade_risk(st_trade))
+            st_sum_r += netR
+            st_peak_r := math.max(st_peak_r, st_sum_r)
+            st_drawdown_r := math.max(st_drawdown_r, st_peak_r - st_sum_r)
+            st_wins += netR > 0 ? 1 : 0
+            st_ambiguous_count += st_trade.ambiguous ? 1 : 0
+            array.set(st_events, 1, array.get(st_events, 1) + 1)
+            st_note(close, 'Closed ' + str.tostring(netR, '#.##') + 'R' + (st_trade.ambiguous ? ' | OHLC ambiguous' : ''), color.gray, true)
+            for ln in st_lines
+                line.set_x2(ln, time_close)
+                line.set_extend(ln, extend.none)
+
+    // 2. Forget consumed liquidity BEFORE publishing new confirmed levels.
+    int li = array.size(st_levels) - 1
+    while li >= 0
+        level = array.get(st_levels, li)
+        swept = level.side == 1 ? high >= level.nearPrice : low <= level.nearPrice
+        isPeriod = str.startswith(level.source, 'Previous ')
+        if swept or (not isPeriod and bar_index - level.born > st_expiry)
+            array.remove(st_levels, li)
+        li -= 1
+    if top > 0
+        st_add_level(1, top, top, 'Swing High')
+    if btm > 0
+        st_add_level(-1, btm, btm, 'Swing Low')
+    if eqh_alert
+        st_add_level(1, eq_prev_top, eq_prev_top, 'EQH')
+    if eql_alert
+        st_add_level(-1, eq_prev_btm, eq_prev_btm, 'EQL')
+    if not na(st_dt) and (na(st_dt[1]) or st_dt != st_dt[1])
+        st_period_levels(st_dh, st_dl, 'Previous Day')
+    if not na(st_wt) and (na(st_wt[1]) or st_wt != st_wt[1])
+        st_period_levels(st_wh, st_wl, 'Previous Week')
+    if not na(st_mt) and (na(st_mt[1]) or st_mt != st_mt[1])
+        st_period_levels(st_mh, st_ml, 'Previous Month')
+
+    // 3. Lifecycle: close invalidation takes precedence over touch/entry.
+    // No birth-bar touch, no first selection on an already-touched candle.
+    for z in st_zones
+        stateBefore = z.state
+        touched = st_step_zone(z, bar_index, time_close, high, low, close, close[1], st_htf_bias, itop_y[1] > 0 ? itop_y[1] : na, ibtm_y[1] > 0 ? ibtm_y[1] : na, st_rsi)
+        st_touch_event := st_touch_event or touched
+        if touched
+            st_touch_count += 1
+        if stateBefore > 0 and stateBefore <= 2 and z.state >= 4
+            st_invalid_count += z.state == 4 ? 1 : 0
+            st_expired_count += z.state == 5 ? 1 : 0
+            st_cancelled_count += z.state == 6 ? 1 : 0
+            st_finish(z, z.state, z.reason)
+        else if touched and not na(z.drawing)
+            box.set_text(z.drawing, (z.side == 1 ? 'Demand' : 'Supply') + ' | Touched')
+
+    // 4. One already-visible area can confirm; same-touch-bar entries excluded.
+    for z in st_zones
+        if st_zone_confirmable(z, bar_index, close, st_rsi, st_mode == 'Area + structure + BULB') and st_mode != 'BULB first appearance'
+            if st_config_ok and st_in_dates
+                st_confirmation_count += 1
+                [sl, t1, t2, qty, why, src1, src2] = st_plan(z.side, close, z.extreme, z.side == 1 ? z.top : z.bottom, false)
+                if st_trade.side != 0 or st_exit_event
+                    why := 'Existing trade or exit-bar cooldown'
+                if why == ''
+                    st_buy_signal := z.side == 1
+                    st_sell_signal := z.side == -1
+                    st_signal_sl := sl
+                    st_signal_t1 := t1
+                    st_signal_t2 := t2
+                    st_signal_qty := qty
+                    st_last_sources := src1 + ' / ' + src2
+                    st_finish(z, 3, 'Used')
+                else
+                    st_rejected_count += 1
+                    st_record_rejection(why)
+                    st_last_reason := why
+                    st_finish(z, 6, why)
+
+    // 5. Fair baseline: first label creation on opposite RSI state transition.
+    // It does not rely on drawing visibility or any subsequently moved label.
+    rawBuy = st_bulb_state == 1 and st_rsi <= 30
+    rawSell = st_bulb_state == 2 and st_rsi >= 65
+    if st_rsi >= 65
+        st_bulb_state := 1
+    else if st_rsi <= 30
+        st_bulb_state := 2
+    if st_mode == 'BULB first appearance' and (rawBuy or rawSell) and st_config_ok and st_in_dates
+        st_confirmation_count += 1
+        side = rawBuy ? 1 : -1
+        invalidation = side == 1 ? math.min(low, ibtm_y > 0 ? ibtm_y : low) : math.max(high, itop_y > 0 ? itop_y : high)
+        [sl, t1, t2, qty, why, src1, src2] = st_plan(side, close, invalidation, close, true)
+        if na(st_htf_bias) or st_htf_bias != side
+            why := 'Baseline HTF mismatch'
+        else if st_trade.side != 0 or st_exit_event
+            why := 'Existing trade or exit-bar cooldown'
+        if why == ''
+            st_buy_signal := side == 1
+            st_sell_signal := side == -1
+            st_signal_sl := sl
+            st_signal_t1 := t1
+            st_signal_t2 := t2
+            st_signal_qty := qty
+            st_last_sources := src1 + ' / ' + src2
+        else
+            st_rejected_count += 1
+            st_record_rejection(why)
+            st_last_reason := why
+
+    if st_buy_signal or st_sell_signal
+        side = st_buy_signal ? 1 : -1
+        st_trade := STTrade.new(side, bar_index, close, st_signal_sl, st_signal_t1, st_signal_t2, st_signal_qty)
+        st_trade.initialRisk := math.abs(close - st_signal_sl)
+        st_last_reason := side == 1 ? 'CONFIRMED BUY' : 'CONFIRMED SELL'
+        r1 = (st_signal_t1 - close) * side / st_trade.initialRisk
+        r2 = (st_signal_t2 - close) * side / st_trade.initialRisk
+        costsR = st_cost_r(st_trade.initialRisk)
+        netRR1 = (r1 - costsR) / (1.0 + costsR)
+        details = st_last_reason + '\nClose model ' + str.tostring(close, format.mintick) + '\nSL ' + str.tostring(st_signal_sl, format.mintick) + '\nTP1 ' + str.tostring(st_signal_t1, format.mintick) + ' (' + str.tostring(r1, '#.##') + 'R)' + '\nTP2 ' + str.tostring(st_signal_t2, format.mintick) + ' (' + str.tostring(r2, '#.##') + 'R)\n' + st_last_sources + '\nEstimated cost-adjusted TP1 ratio: ' + str.tostring(netRR1, '#.##') + '\nLate live entries require a new risk check; do not chase this marker.'
+        st_note(side == 1 ? low : high, details, side == 1 ? color.teal : color.maroon, side == -1)
+        st_trade_level(close, color.gray, 'Entry')
+        st_trade_level(st_signal_sl, color.red, 'SL')
+        st_trade_level(st_signal_t1, color.aqua, 'TP1')
+        st_trade_level(st_signal_t2, color.blue, 'TP2')
+
+    // 6. Select for FUTURE candles only; closest eligible candidate wins.
+    // A lock is never replaced merely because another candidate scores better.
+    if st_chart_ok and st_stop_config_ok and st_in_dates and (st_htf_bias == 1 or st_htf_bias == -1)
+        bool locked = false
+        STZone best = na
+        float bestDistance = na
+        for z in st_zones
+            if z.side == st_htf_bias
+                if z.state == 1 or z.state == 2
+                    locked := true
+                distance = z.side == 1 ? close - z.top : z.bottom - close
+                width = z.rawTop - z.rawBottom
+                if z.state == 0 and distance > 0 and width + st_stop_buffer < st_selection_risk
+                    if na(bestDistance) or distance < bestDistance
+                        best := z
+                        bestDistance := distance
+        if not locked and not na(best)
+            best.state := 1
+            best.selectedTime := time_close
+            best.reason := 'Waiting for first touch'
+            st_selected_count += 1
+            st_area_event := true
+            if st_show
+                best.drawing := box.new(time_close, best.top, time_close + int(timeframe.in_seconds() * 1000), best.bottom, xloc=xloc.bar_time, extend=extend.right, bgcolor=color.new(best.side == 1 ? color.teal : color.maroon, 88), border_color=best.side == 1 ? color.teal : color.maroon, border_width=2, text=(best.side == 1 ? 'Demand' : 'Supply') + ' | Locked #' + str.tostring(best.id), text_color=theme_text_css, text_size=size.tiny)
+                array.push(st_boxes, best.drawing)
+                if array.size(st_boxes) > st_keep
+                    box.delete(array.shift(st_boxes))
+
+    // Keep sufficient terminal history for birth deduplication; no live eviction.
+    int zi = array.size(st_zones) - 1
+    while zi >= 0
+        z = array.get(st_zones, zi)
+        if z.state >= 3 and bar_index - z.born > st_expiry
+            array.remove(st_zones, zi)
+        zi -= 1
+
+var st_table = table.new(position.bottom_left, 2, 14, bgcolor=color.new(is_light_theme ? color.white : color.black, 10), border_width=1)
+if (barstate.islast or barstate.islastconfirmedhistory) and st_panel
+    status = not st_enabled ? 'Disabled' : not st_chart_ok ? 'Use standard intraday chart below HTF' : not st_units_ok ? 'Verify symbol / pip size' : not st_in_dates ? 'Outside entry date window' : array.get(st_events, 0) > 0 ? 'Capacity reached: entries blocked' : st_trade.side != 0 ? 'Research trade open' : st_last_reason
+    int count = array.get(st_events, 1)
+    table.cell(st_table, 0, 0, 'SMART TRADE | RESEARCH', text_color=color.white, bgcolor=color.navy)
+    table.cell(st_table, 1, 0, status, text_color=color.white, bgcolor=color.navy)
+    table.cell(st_table, 0, 1, 'HTF / bias', text_color=theme_text_css)
+    table.cell(st_table, 1, 1, st_htf + ' / ' + (st_htf_bias == 1 ? 'Bull' : st_htf_bias == -1 ? 'Bear' : 'Unknown'), text_color=theme_text_css)
+    table.cell(st_table, 0, 2, st_stop_model + ' / estimated costs', text_color=theme_text_css)
+    stopDisplay = st_stop_model == 'Fixed 100 pips' ? str.tostring(st_risk, format.mintick) : na(st_trade.initialRisk) ? 'No entry yet' : str.tostring(st_trade.initialRisk, format.mintick) + ' last SL distance'
+    table.cell(st_table, 1, 2, (st_stop_config_ok ? stopDisplay : 'Invalid min/max stop') + ' / ' + str.tostring(st_cost_pips) + ' pips cost', text_color=theme_text_css)
+    table.cell(st_table, 0, 3, 'Selected / entry-plan rejects', text_color=theme_text_css)
+    table.cell(st_table, 1, 3, str.tostring(st_selected_count) + ' / ' + str.tostring(st_rejected_count), text_color=theme_text_css)
+    table.cell(st_table, 0, 4, 'Whole positions: closed / open', text_color=theme_text_css)
+    table.cell(st_table, 1, 4, str.tostring(count) + ' / ' + (st_trade.side != 0 ? '1' : '0'), text_color=theme_text_css)
+    table.cell(st_table, 0, 5, 'Net R / average R', text_color=theme_text_css)
+    table.cell(st_table, 1, 5, str.tostring(st_sum_r, '#.##') + ' / ' + (count > 0 ? str.tostring(st_sum_r / count, '#.##') : 'n/a'), text_color=theme_text_css)
+    table.cell(st_table, 0, 6, 'Net wins / closed-equity DD', text_color=theme_text_css)
+    table.cell(st_table, 1, 6, str.tostring(st_wins) + ' / ' + str.tostring(st_drawdown_r, '#.##') + 'R', text_color=theme_text_css)
+    table.cell(st_table, 0, 7, 'TP1 / TP2 / ambiguous trades', text_color=theme_text_css)
+    table.cell(st_table, 1, 7, str.tostring(st_tp1_count) + ' / ' + str.tostring(st_tp2_count) + ' / ' + str.tostring(st_ambiguous_count), text_color=theme_text_css)
+    table.cell(st_table, 0, 8, 'Last target sources', text_color=theme_text_css)
+    table.cell(st_table, 1, 8, st_last_sources, text_color=theme_text_css)
+    table.cell(st_table, 0, 9, 'Assumption', text_color=theme_text_css)
+    table.cell(st_table, 1, 9, 'Close fills; OHLC path; no news filter', text_color=theme_text_css)
+    coverage = na(st_window_first) ? 'No bars in entry window' : str.format_time(st_window_first, 'yyyy-MM-dd', 'UTC') + ' to ' + str.format_time(st_window_last, 'yyyy-MM-dd', 'UTC') + ' | ' + str.tostring(st_window_bars) + ' bars'
+    table.cell(st_table, 0, 10, 'Actual entry-window data (UTC)', text_color=theme_text_css)
+    table.cell(st_table, 1, 10, coverage, text_color=theme_text_css, tooltip='First loaded candle: ' + str.format_time(st_loaded_first, 'yyyy-MM-dd HH:mm', 'UTC') + '\nDate inputs filter available bars; they do not load additional history. Native partial exits are not separate whole positions.')
+    table.cell(st_table, 0, 11, 'Touches / entry checks / occupied bars', text_color=theme_text_css)
+    table.cell(st_table, 1, 11, str.tostring(st_touch_count) + ' / ' + str.tostring(st_confirmation_count) + ' / ' + str.tostring(st_occupied_bars), text_color=theme_text_css, tooltip='Touches count selected areas. Entry checks count structure confirmations, or first-appearance BULB events in baseline mode. Occupied bars already had a research position; one-position-only rules block overlapping entries.')
+    table.cell(st_table, 0, 12, 'Invalidated / expired / cancelled areas', text_color=theme_text_css)
+    table.cell(st_table, 1, 12, str.tostring(st_invalid_count) + ' / ' + str.tostring(st_expired_count) + ' / ' + str.tostring(st_cancelled_count), text_color=theme_text_css, tooltip='Selected-area lifecycle outcomes before the final entry plan: price invalidation, zone/confirmation expiry, and HTF/trigger cancellation. Final entry-plan rejections are counted separately.')
+    string rejectDetails = ''
+    string leadingReject = 'None'
+    int leadingCount = 0
+    if array.size(st_rejection_names) > 0
+        for ri = 0 to array.size(st_rejection_names) - 1
+            rejectName = array.get(st_rejection_names, ri)
+            rejectCount = array.get(st_rejection_counts, ri)
+            rejectDetails += rejectName + ': ' + str.tostring(rejectCount) + '\n'
+            if rejectCount > leadingCount
+                leadingCount := rejectCount
+                leadingReject := rejectName + ': ' + str.tostring(rejectCount)
+    table.cell(st_table, 0, 13, 'Main entry veto (hover for all)', text_color=theme_text_css)
+    table.cell(st_table, 1, 13, leadingReject, text_color=theme_text_css, tooltip=rejectDetails)
+
+alertcondition(st_area_event, 'Smart Trade: area locked', 'A confirmed Demand/Supply area was locked for a future touch.')
+alertcondition(st_touch_event, 'Smart Trade: area touched', 'Locked area touched. This is NOT an entry.')
+alertcondition(st_buy_signal, 'Smart Trade: confirmed BUY', 'Close-confirmed BUY research plan. Verify live entry, SL and targets; fills are not guaranteed.')
+alertcondition(st_sell_signal, 'Smart Trade: confirmed SELL', 'Close-confirmed SELL research plan. Verify live entry, SL and targets; fills are not guaranteed.')

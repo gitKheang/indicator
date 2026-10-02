@@ -1,0 +1,211 @@
+// Synthetic cases invoke the EXACT production target, risk and fill functions.
+// These are code-behaviour tests, not evidence of trading profitability.
+st_assert(bool condition, string name) =>
+    if na(condition) or not condition
+        runtime.error('SMART TRADE CONTRACT FAILED: ' + name)
+
+st_near(float actual, float expected) =>
+    math.abs(actual - expected) <= math.max(syminfo.mintick * 1.1, 0.000001)
+
+if barstate.isfirst
+    [eSL, e1, e2, eQ, eWhy, eS1, eS2] = st_plan(1, 100, 95, 99, false)
+    st_assert(eWhy == 'No TP1', 'empty target registry fails closed')
+    array.push(st_levels, STLevel.new(1, 135.2, 135.2, 'far', 0))
+    array.push(st_levels, STLevel.new(1, 122.4, 122.4, 'duplicate cluster', 0))
+    array.push(st_levels, STLevel.new(1, 122.2, 122.2, 'nearest', 0))
+    [sl, t1, t2, q, why, src1, src2] = st_plan(1, 100, 95, 99, false)
+    st_assert(why == '', 'valid long passes')
+    st_assert(st_near(sl, 90), 'fixed 100 pip long stop')
+    st_assert(st_near(t1, 122) and st_near(t2, 135), 'sort cluster and buffer')
+    st_assert(src1 == 'nearest' and src2 == 'far', 'source identities retained')
+    // Decimal quantity steps are binary floats; exact modulo equality can
+    // fail for a correctly rounded quantity. Check integer step count instead.
+    halfSteps = q / (2 * st_qty_step)
+    st_assert(q > 0 and math.abs(halfSteps - math.round(halfSteps)) < 0.000001, 'quantity supports exact half exits')
+    array.push(st_levels, STLevel.new(1, 115.2, 115.2, 'near obstacle', 0))
+    [csl, c1, c2, cq, cwhy, cs1, cs2] = st_plan(1, 100, 95, 99, false)
+    st_assert(cwhy == 'Nearest TP1 below 2R', 'never skip closer obstacle')
+    array.pop(st_levels)
+    [bsl, b1, b2, bq, bwhy, bs1, bs2] = st_plan(1, 100, 89, 99, false)
+    st_assert(bwhy == '100-pip SL fails structure', 'stop cannot be inside invalidation')
+    [xsl, x1, x2, xq, xwhy, xs1, xs2] = st_plan(1, 100, 95, 80, false)
+    st_assert(xwhy == 'Confirmation too far from area', 'no late chase')
+    array.clear(st_levels)
+    array.push(st_levels, STLevel.new(-1, 77.8, 77.8, 'near low', 0))
+    array.push(st_levels, STLevel.new(-1, 64.8, 64.8, 'far low', 0))
+    [ssl, s1, s2, sq, swhy, ss1, ss2] = st_plan(-1, 100, 105, 101, false)
+    st_assert(swhy == '' and st_near(ssl, 110), 'short stop mirror')
+    st_assert(st_near(s1, 78) and st_near(s2, 65), 'short buffered target mirror')
+    array.pop(st_levels)
+    [nsl, n1, n2, nq, nwhy, ns1, ns2] = st_plan(-1, 100, 105, 101, false)
+    st_assert(nwhy == 'No distinct TP2', 'missing second target rejected')
+    array.clear(st_levels)
+    z = STZone.new(1, -1, 1, 1, 101, 99, 101, 99)
+    array.push(st_zones, z)
+    [isl, i1, i2, iq, iwhy, is1, is2] = st_plan(1, 100, 95, 99, false)
+    st_assert(iwhy == 'Entry inside opposing Demand/Supply', 'inside opposing zone veto')
+    z.top := 116
+    z.bottom := 115
+    z.fresh := false
+    z.state := 6
+    [v1, v2, vn1, vn2] = st_target_pair(1, 100)
+    st_assert(st_near(v1, 114.8), 'tested or bias-rejected zone remains an obstacle')
+    z.valid := false
+    [iv1, iv2, ivn1, ivn2] = st_target_pair(1, 100)
+    st_assert(na(iv1), 'invalidated zone excluded')
+    array.clear(st_zones)
+    trade = STTrade.new(1, 0, 100, 90, 122, 135, 10)
+    st_process_point(trade, 122, false)
+    st_assert(trade.partial and st_near(trade.gross, 1.1) and trade.remaining == 0.5, 'TP1 accounts for half only')
+    st_prepare_trade_bar(trade)
+    st_assert(st_near(trade.stop, 90), 'default keeps original stop after TP1')
+    st_process_point(trade, 90, false)
+    st_assert(trade.side == 0 and st_near(trade.gross, 0.6), 'TP1 then original stop = 0.6R')
+    st_process_point(trade, 150, false)
+    st_assert(st_near(trade.gross, 0.6), 'closed trade never pays twice')
+    winner = STTrade.new(1, 0, 100, 90, 122, 135, 10)
+    st_process_point(winner, 140, false)
+    st_assert(winner.completedTP2 and st_near(winner.gross, 2.85), 'two targets weighted correctly')
+    gapLoser = STTrade.new(1, 0, 100, 90, 122, 135, 10)
+    st_process_point(gapLoser, 80, true)
+    st_assert(st_near(gapLoser.gross, -2), 'gap loss is not falsely capped at 1R')
+    gapWinner = STTrade.new(1, 0, 100, 90, 122, 135, 10)
+    st_process_point(gapWinner, 140, true)
+    st_assert(st_near(gapWinner.gross, 4), 'favourable gap fills at open')
+    shortWinner = STTrade.new(-1, 0, 100, 110, 78, 65, 10)
+    st_process_point(shortWinner, 60, false)
+    st_assert(st_near(shortWinner.gross, 2.85), 'short exit accounting mirror')
+    st_stop_mode := 'Breakeven after TP1 (next bar)'
+    beTrade = STTrade.new(1, 0, 100, 90, 122, 135, 10)
+    st_process_point(beTrade, 122, false)
+    st_prepare_trade_bar(beTrade)
+    st_assert(st_near(beTrade.stop, 100), 'breakeven moves remaining stop after TP1')
+    untouchedStop = STTrade.new(1, 0, 100, 90, 122, 135, 10)
+    st_prepare_trade_bar(untouchedStop)
+    st_assert(st_near(untouchedStop.stop, 90), 'breakeven cannot move stop before TP1')
+    st_stop_mode := 'Fixed original stop'
+    area = STZone.new(7, 1, 1000, 10, 100, 95, 100, 94)
+    area.state := 1
+    st_step_zone(area, 10, 10000, 102, 94, 99, 101, 1, 103, 92, 29)
+    st_assert(area.state == 1 and area.fresh, 'birth candle cannot touch')
+    st_step_zone(area, 11, 11000, 102, 94, 99, 101, 1, 103, 92, 29)
+    st_assert(area.state == 2 and area.touched == 11 and area.touchTime == 11000, 'future touch captured')
+    st_assert(not st_zone_confirmable(area, 11, 104, 40, false), 'same touch bar cannot confirm')
+    st_step_zone(area, 12, 12000, 106, 93, 104, 99, 1, 108, 92, 40)
+    st_assert(st_near(area.trigger, 103) and st_near(area.extreme, 93), 'trigger frozen and worst wick tracked')
+    st_assert(st_zone_confirmable(area, 12, 104, 40, true), 'bulb recovery with later close confirms')
+    st_assert(not st_zone_confirmable(area, 12, 104, 29, true), 'unrecovered bulb does not confirm')
+    area.state := 3
+    st_step_zone(area, 13, 13000, 107, 96, 105, 104, 1, 106, 92, 40)
+    st_assert(not st_zone_confirmable(area, 13, 105, 40, false) and area.state == 3, 'used area never rearms')
+    st_assert(area.id == 7 and area.top == 100 and area.bottom == 95, 'identity and geometry immutable')
+    untouched = STZone.new(8, 1, 2000, 10, 100, 95, 100, 94)
+    st_step_zone(untouched, 11, 11000, 102, 99, 101, 102, 1, 103, 92, 40)
+    st_assert(untouched.state == 7 and not untouched.fresh, 'unselected first touch consumes freshness')
+    invalid = STZone.new(9, 1, 3000, 10, 100, 95, 100, 94)
+    invalid.state := 1
+    st_step_zone(invalid, 11, 11000, 105, 90, 93, 102, 1, 103, 92, 40)
+    st_assert(invalid.state == 4 and not invalid.valid and na(invalid.touched), 'close invalidation precedes touch')
+    expired = STZone.new(10, 1, 4000, 10, 100, 95, 100, 94)
+    expired.state := 1
+    st_step_zone(expired, 251, 251000, 106, 104, 105, 104, 1, 110, 92, 40)
+    st_assert(expired.state == 5 and not expired.valid, 'zone age expires')
+    biasChanged = STZone.new(11, 1, 5000, 10, 100, 95, 100, 94)
+    biasChanged.state := 1
+    st_step_zone(biasChanged, 11, 11000, 106, 104, 105, 104, -1, 110, 92, 40)
+    st_assert(biasChanged.state == 6 and biasChanged.valid and biasChanged.fresh, 'bias cancellation does not erase market obstacle')
+    noAnchor = STZone.new(12, 1, 6000, 10, 100, 95, 100, 94)
+    noAnchor.state := 1
+    st_step_zone(noAnchor, 11, 11000, 102, 99, 101, 102, 1, na, 92, 40)
+    st_assert(noAnchor.state == 6, 'missing confirmed anchor rejected')
+    oldBreak = STZone.new(13, 1, 7000, 10, 100, 95, 100, 94)
+    oldBreak.state := 1
+    st_step_zone(oldBreak, 11, 11000, 105, 99, 104, 104, 1, 103, 92, 40)
+    st_assert(oldBreak.state == 6, 'break before touch not confirmation')
+    reclaim = STZone.new(16, 1, 10000, 10, 100, 95, 100, 94)
+    reclaim.state := 1
+    st_step_zone(reclaim, 11, 11000, 105, 99, 101, 104, 1, 103, 92, 40)
+    st_assert(reclaim.state == 2 and not st_zone_confirmable(reclaim, 11, 104, 40, false), 'touch resets old bullish break without same-bar entry')
+    st_step_zone(reclaim, 12, 12000, 105, 100, 104, 101, 1, 110, 92, 40)
+    st_assert(st_zone_confirmable(reclaim, 12, 104, 40, false) and reclaim.trigger == 103, 'later bullish reclaim uses frozen anchor')
+    shortReclaim = STZone.new(17, -1, 11000, 10, 105, 100, 106, 100)
+    shortReclaim.state := 1
+    st_step_zone(shortReclaim, 11, 11000, 101, 95, 99, 96, -1, 110, 97, 50)
+    st_assert(shortReclaim.state == 2 and not st_zone_confirmable(shortReclaim, 11, 96, 50, false), 'touch resets old bearish break without same-bar entry')
+    st_step_zone(shortReclaim, 12, 12000, 100, 95, 96, 99, -1, 110, 90, 50)
+    st_assert(st_zone_confirmable(shortReclaim, 12, 96, 50, false) and shortReclaim.trigger == 97, 'later bearish reclaim uses frozen anchor')
+    timedOut = STZone.new(14, 1, 8000, 10, 100, 95, 100, 94)
+    timedOut.state := 1
+    st_step_zone(timedOut, 11, 11000, 102, 99, 101, 102, 1, 103, 92, 40)
+    st_step_zone(timedOut, 24, 24000, 106, 101, 104, 101, 1, 105, 92, 40)
+    st_assert(timedOut.state == 5 and not st_zone_confirmable(timedOut, 24, 104, 40, false), 'confirmation timeout precedes signal')
+    shortArea = STZone.new(15, -1, 9000, 10, 105, 100, 106, 100)
+    shortArea.state := 1
+    st_step_zone(shortArea, 11, 11000, 101, 98, 99, 98, -1, 110, 97, 70)
+    st_step_zone(shortArea, 12, 12000, 101, 95, 96, 99, -1, 110, 93, 50)
+    st_assert(st_zone_confirmable(shortArea, 12, 96, 50, true), 'short touch and confirmation mirror')
+    st_assert(st_near(shortArea.extreme, 106) and st_near(shortArea.trigger, 97), 'short wick and trigger retained')
+
+    // A separate risk experiment: actual structure determines R and quantity.
+    array.clear(st_zones)
+    array.clear(st_levels)
+    array.push(st_levels, STLevel.new(1, 115.2, 115.2, 'near', 0))
+    array.push(st_levels, STLevel.new(1, 125.2, 125.2, 'far', 0))
+    st_stop_model := 'Structure + buffer'
+    [asl, a1, a2, aq, awhy, as1, as2] = st_plan(1, 100, 95, 99, false)
+    st_assert(awhy == '' and st_near(asl, 94.5), 'structural long clears wick plus buffer')
+    st_assert(aq * (100 - asl) * syminfo.pointvalue <= st_risk_cash + 0.0001, 'adaptive size respects cash risk')
+    st_assert((100 - asl) * syminfo.pointvalue * (aq + 2 * st_qty_step) > st_risk_cash, 'adaptive quantity rounds down by exact half-exit increments')
+    [msl, m1, m2, mq, mwhy, ms1, ms2] = st_plan(1, 100, 99, 99, false)
+    st_assert(mwhy == '' and st_near(msl, 98), 'minimum stop prevents tiny risk distance')
+    [wsl, w1, w2, wq, wwhy, ws1, ws2] = st_plan(1, 100, 40, 99, false)
+    st_assert(wwhy == 'Structural stop exceeds maximum', 'wide structural stop rejected')
+    [zsl, z1, z2, zq, zwhy, zs1, zs2] = st_plan(1, 100, na, 99, false)
+    st_assert(zwhy == 'Invalid structural stop', 'missing structural invalidation rejected')
+    array.push(st_levels, STLevel.new(1, 105.2, 105.2, 'closer obstacle', 0))
+    [osl, o1, o2, oq, owhy, os1, os2] = st_plan(1, 100, 95, 99, false)
+    st_assert(owhy == 'Nearest TP1 below 2R', 'adaptive mode still respects closest obstacle')
+    array.pop(st_levels)
+    st_target_mode := 'Fixed 2R / 3R benchmark'
+    [fsl, f1, f2, fq, fwhy, fs1, fs2] = st_plan(1, 100, 95, 99, false)
+    st_assert(fwhy == '' and st_near(f1, 111) and st_near(f2, 116.5), 'benchmark uses actual stop distance')
+    st_target_mode := 'Structure'
+    array.clear(st_levels)
+    array.push(st_levels, STLevel.new(-1, 84.8, 84.8, 'near', 0))
+    array.push(st_levels, STLevel.new(-1, 74.8, 74.8, 'far', 0))
+    [hsl, h1, h2, hq, hwhy, hs1, hs2] = st_plan(-1, 100, 105, 101, false)
+    st_assert(hwhy == '' and st_near(hsl, 105.5), 'structural short mirror')
+    adaptiveTrade = STTrade.new(1, 0, 100, 95, 110, 115, 10)
+    adaptiveTrade.initialRisk := 5
+    st_process_point(adaptiveTrade, 110, false)
+    st_assert(st_near(adaptiveTrade.gross, 1), 'adaptive TP1 accounts in frozen R')
+    st_stop_mode := 'Breakeven after TP1 (next bar)'
+    st_prepare_trade_bar(adaptiveTrade)
+    st_process_point(adaptiveTrade, 100, false)
+    st_assert(adaptiveTrade.side == 0 and st_near(adaptiveTrade.gross, 1) and st_trade_risk(adaptiveTrade) == 5, 'breakeven preserves initial R denominator')
+    adaptiveGap = STTrade.new(-1, 0, 100, 120, 60, 40, 10)
+    adaptiveGap.initialRisk := 20
+    st_process_point(adaptiveGap, 130, true)
+    st_assert(st_near(adaptiveGap.gross, -1.5), 'adaptive gap loss uses actual risk')
+    st_assert(math.abs(st_cost_r(5) - 0.08) < 0.000001 and math.abs(st_cost_r(20) - 0.02) < 0.000001, 'pip costs scale with individual stop distance')
+    st_stop_mode := 'Fixed original stop'
+    st_stop_model := 'Fixed 100 pips'
+
+    st_confirmation_anchor := 'Touch candle break'
+    fastLong = STZone.new(18, 1, 12000, 10, 100, 95, 100, 94)
+    fastLong.state := 1
+    st_step_zone(fastLong, 11, 11000, 102, 98, 101, 103, 1, 120, 90, 40)
+    st_assert(fastLong.state == 2 and fastLong.trigger == 102 and not st_zone_confirmable(fastLong, 11, 103, 40, false), 'touch high frozen without same-bar entry')
+    st_step_zone(fastLong, 12, 12000, 104, 100, 103, 101, 1, 125, 90, 40)
+    st_assert(st_zone_confirmable(fastLong, 12, 103, 40, false) and fastLong.trigger == 102, 'later touch-high break qualifies before distant swing')
+    fastShort = STZone.new(19, -1, 13000, 10, 105, 100, 106, 100)
+    fastShort.state := 1
+    st_step_zone(fastShort, 11, 11000, 102, 98, 99, 97, -1, 120, 80, 50)
+    st_assert(fastShort.state == 2 and fastShort.trigger == 98 and not st_zone_confirmable(fastShort, 11, 97, 50, false), 'touch low frozen without same-bar entry')
+    st_step_zone(fastShort, 12, 12000, 100, 96, 97, 99, -1, 120, 75, 50)
+    st_assert(st_zone_confirmable(fastShort, 12, 97, 50, false) and fastShort.trigger == 98, 'later touch-low break qualifies before distant swing')
+    st_confirmation_anchor := 'Internal swing'
+
+var result = table.new(position.middle_center, 1, 1)
+if barstate.islast
+    table.cell(result, 0, 0, 'PASS: 63 Smart Trade contract assertions', text_color=color.white, bgcolor=color.teal)
